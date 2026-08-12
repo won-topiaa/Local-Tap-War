@@ -102,13 +102,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('map');
   const [selectedNeighborhood, setSelectedNeighborhood] = useState(MY_NEIGHBORHOOD_ID);
   const [showOnboarding, setShowOnboarding] = useState(!saved.hasOnboarded);
-  const [lastRank, setLastRank] = useState(() => {
-    const sorted = [...neighborhoodData].sort((a, b) => b.taps - a.taps);
-    return sorted.findIndex((n) => n.id === MY_NEIGHBORHOOD_ID);
-  });
 
   const comboTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevLevelRef = useRef(calculateLevel(saved.totalXp).level);
+  const lastRankRef = useRef(
+    [...initialNeighborhoods].sort((a, b) => b.taps - a.taps).findIndex((n) => n.id === MY_NEIGHBORHOOD_ID)
+  );
+  const isFeverRef = useRef(false);
 
   // --- Hooks ---
   const playSound = useSound(settings.sound);
@@ -198,7 +198,9 @@ export default function App() {
       const tapValue = baseTapValue * multiplier;
       const xpGained = tapValue;
 
-      if (isNowFever && !isFever) {
+      const feverJustStarted = isNowFever && !isFeverRef.current;
+
+      if (feverJustStarted) {
         setSaved((prev) => ({ ...prev, feverCount: prev.feverCount + 1 }));
         playSound('fever');
       } else if (nextCombo % 10 === 0 && nextCombo > 0) {
@@ -209,6 +211,7 @@ export default function App() {
 
       setCombo(nextCombo);
       setIsFever(isNowFever);
+      isFeverRef.current = isNowFever;
       sessionTapsRef.current += tapValue;
       sessionXpRef.current += xpGained;
 
@@ -233,14 +236,13 @@ export default function App() {
         );
         const sorted = [...updated].sort((a, b) => b.taps - a.taps);
         const myNewRank = sorted.findIndex((n) => n.id === MY_NEIGHBORHOOD_ID);
-        if (myNewRank < lastRank && myNewRank <= 2) {
+        if (myNewRank < lastRankRef.current && myNewRank <= 2) {
           setToastMessage(RANK_MESSAGES[myNewRank] ?? `역삼동 ${myNewRank + 1}위!`);
-          setLastRank(myNewRank);
+          lastRankRef.current = myNewRank;
         }
         return updated;
       });
 
-      // Mission progress update
       setMissionState((prev) => ({
         ...prev,
         missions: prev.missions.map((m) => {
@@ -248,7 +250,7 @@ export default function App() {
           let newProgress = m.progress;
           if (m.statKey === 'sessionTaps') newProgress += tapValue;
           if (m.statKey === 'sessionBestCombo') newProgress = Math.max(newProgress, nextCombo);
-          if (m.statKey === 'sessionFeverCount' && isNowFever && !isFever) newProgress += 1;
+          if (m.statKey === 'sessionFeverCount' && feverJustStarted) newProgress += 1;
           if (m.statKey === 'sessionXp') newProgress += xpGained;
           const completed = newProgress >= m.target;
           if (completed && !m.completed) playSound('missionComplete');
@@ -279,10 +281,11 @@ export default function App() {
         comboTimeoutRef.current = setTimeout(() => {
           setCombo(0);
           setIsFever(false);
+          isFeverRef.current = false;
         }, 1000);
       }
     },
-    [combo, isFever, addTap, lastRank, powerUp, settings.haptic, playSound, setSaved, setMissionState],
+    [combo, addTap, powerUp, settings.haptic, playSound, setSaved, setMissionState],
   );
 
   tapCoreRef.current = handleTapCore;
@@ -346,8 +349,11 @@ export default function App() {
     sessionXpRef.current = 0;
     setCombo(0);
     setIsFever(false);
+    isFeverRef.current = false;
     setNeighborhoodData(initialNeighborhoods);
     prevLevelRef.current = 1;
+    const sorted = [...initialNeighborhoods].sort((a, b) => b.taps - a.taps);
+    lastRankRef.current = sorted.findIndex((n) => n.id === MY_NEIGHBORHOOD_ID);
   }, [setSaved, setMissionState, todaySeed]);
 
   // --- Derived ---

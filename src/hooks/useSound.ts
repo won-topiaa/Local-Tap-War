@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useEffect } from 'react';
 
 type SoundName = 'tap' | 'combo' | 'fever' | 'levelUp' | 'achievement' | 'powerUp' | 'missionComplete';
 
@@ -10,6 +10,10 @@ export function useSound(enabled: boolean) {
       ctxRef.current = new AudioContext();
     }
     return ctxRef.current;
+  }, []);
+
+  useEffect(() => {
+    return () => { ctxRef.current?.close(); ctxRef.current = null; };
   }, []);
 
   const play = useCallback((name: SoundName) => {

@@ -8,17 +8,19 @@ interface TapSyncOptions {
 export function useTapSync({ intervalMs = 2000, onSync }: TapSyncOptions = {}) {
   const pendingTaps = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onSyncRef = useRef(onSync);
+  onSyncRef.current = onSync;
 
   const flush = useCallback(async () => {
     if (pendingTaps.current === 0) return;
     const batch = pendingTaps.current;
     pendingTaps.current = 0;
     try {
-      await onSync?.(batch);
+      await onSyncRef.current?.(batch);
     } catch {
       pendingTaps.current += batch;
     }
-  }, [onSync]);
+  }, []);
 
   useEffect(() => {
     timerRef.current = setInterval(flush, intervalMs);

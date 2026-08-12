@@ -10,7 +10,8 @@ interface LevelBadgeProps {
 
 export function LevelBadge({ level, currentXp, requiredXp, isFever }: LevelBadgeProps) {
   const tier = getTier(level);
-  const progress = requiredXp > 0 ? currentXp / requiredXp : 0;
+  const isMaxLevel = level >= 99;
+  const progress = isMaxLevel ? 1 : (requiredXp > 0 ? Math.min(currentXp / requiredXp, 1) : 0);
 
   return (
     <div className="flex items-center gap-2">
@@ -26,7 +27,7 @@ export function LevelBadge({ level, currentXp, requiredXp, isFever }: LevelBadge
             {tier.title}
           </span>
           <span className={`text-[10px] ${isFever ? 'text-indigo-300' : 'text-gray-400'}`}>
-            {currentXp}/{requiredXp}
+            {isMaxLevel ? 'MAX' : `${currentXp}/${requiredXp}`}
           </span>
         </div>
         <div className={`h-1.5 rounded-full overflow-hidden ${isFever ? 'bg-white/15' : 'bg-gray-200'}`}>

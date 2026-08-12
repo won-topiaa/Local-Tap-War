@@ -1,10 +1,17 @@
 import { useState, useCallback } from 'react';
 
+export function useLocalStorage<T extends Record<string, unknown>>(key: string, initialValue: T): [T, (value: T | ((prev: T) => T)) => void];
+export function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T | ((prev: T) => T)) => void];
 export function useLocalStorage<T>(key: string, initialValue: T): [T, (value: T | ((prev: T) => T)) => void] {
   const [stored, setStored] = useState<T>(() => {
     try {
       const item = localStorage.getItem(key);
-      return item ? JSON.parse(item) : initialValue;
+      if (!item) return initialValue;
+      const parsed = JSON.parse(item);
+      if (initialValue && typeof initialValue === 'object' && !Array.isArray(initialValue) && typeof parsed === 'object' && parsed !== null) {
+        return { ...initialValue, ...parsed } as T;
+      }
+      return parsed as T;
     } catch {
       return initialValue;
     }
