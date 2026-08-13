@@ -30,6 +30,17 @@ interface FeedEntry {
   type: 'player' | 'npc' | 'system';
 }
 
+interface TheftEvent {
+  npc: string;
+  districtId: number;
+  districtName: string;
+}
+
+interface InvasionReport {
+  thefts: TheftEvent[];
+  otherConquests: number;
+}
+
 // ═══════════════════════════════════════════════════════════
 // Constants & Mock Data
 // ═══════════════════════════════════════════════════════════
@@ -43,6 +54,15 @@ const NPC_COLORS: Record<string, string> = {
 
 const PLAYER_COLOR = '#00e5ff';
 const UNCLAIMED_BG = '#1e1e3a';
+
+// HP 배율 — 시즌이 7일이므로 점령에 훨씬 많은 클릭이 필요하도록 상향
+const HP_SCALE = 10;
+
+// NPC는 유저가 앱을 보고 있는 동안엔 활동하지 않고, 자리를 비운 사이에만 깨어난다.
+// 모든 유저에게 동일하게 적용되는 고정 상수 (랜덤 요소 없음 = 공평).
+const NPC_OFFLINE_DPS = 0.15;                 // 부재 중 전체 NPC 합산 초당 데미지 (유저 연타 ~20dps 대비 훨씬 느림)
+const NPC_MAX_OFFLINE_MS = 8 * 3600 * 1000;   // 한 번의 부재당 최대 8시간까지만 시뮬레이션 (NPC도 잠은 잔다)
+const NPC_MIN_OFFLINE_MS = 60 * 1000;         // 1분 미만의 이탈로는 NPC가 깨어나지 않음
 
 type DData = Omit<District, 'currentHp' | 'owner'>;
 const D = (id: number, name: string, region: string, row: number, col: number, maxHp: number): DData =>
@@ -208,11 +228,56 @@ function formatTime(ms: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
+// ── 부재 중 NPC 시뮬레이션 ──────────────────────────
+// 유저가 자리를 비운 elapsedMs 동안 NPC들이 활동한 결과를 일괄 계산한다.
+// 우선 플레이어의 영토(HP 낮은 순)를 노리고, 없으면 미점령지를 먹는다.
+// 플레이어의 마지막 1개 영토는 절대 뺏지 않는다 (전멸 방지).
+function simulateNpcOffline(
+  districts: District[],
+  elapsedMs: number,
+): { districts: District[]; thefts: TheftEvent[]; otherConquests: number } {
+  const cappedMs = Math.min(elapsedMs, NPC_MAX_OFFLINE_MS);
+  let budget = Math.floor((cappedMs / 1000) * NPC_OFFLINE_DPS);
+  if (budget <= 0) return { districts, thefts: [], otherConquests: 0 };
+
+  const next = districts.map(d => ({ ...d }));
+  const thefts: TheftEvent[] = [];
+  let otherConquests = 0;
+  let npcIdx = Math.floor(elapsedMs / 1000) % NPC_NAMES.length;
+
+  while (budget > 0) {
+    const playerLands = next.filter(d => d.owner === 'player');
+    const stealable = playerLands.length > 1 ? playerLands : [];
+    const pool = stealable.length ? stealable : next.filter(d => !d.owner);
+    if (!pool.length) break;
+
+    pool.sort((a, b) => a.currentHp - b.currentHp);
+    const target = pool[0];
+    const dmg = Math.min(budget, target.currentHp);
+    target.currentHp -= dmg;
+    budget -= dmg;
+
+    if (target.currentHp <= 0) {
+      const npc = NPC_NAMES[npcIdx % NPC_NAMES.length];
+      npcIdx++;
+      if (target.owner === 'player') {
+        thefts.push({ npc, districtId: target.id, districtName: target.name });
+      } else {
+        otherConquests++;
+      }
+      target.owner = npc;
+      target.currentHp = target.maxHp;
+    }
+  }
+
+  return { districts: next, thefts, otherConquests };
+}
+
 // ═══════════════════════════════════════════════════════════
 // Local Storage
 // ═══════════════════════════════════════════════════════════
 
-const SAVE_KEY = 'tapwar_pixel_v2';
+const SAVE_KEY = 'tapwar_pixel_v3';
 const KEYCAP_DESIGNS_KEY = 'tapwar_keycap_designs_v1';
 
 interface SaveData {
@@ -222,6 +287,7 @@ interface SaveData {
   seasonEnd: number;
   keycapCount?: number;
   activeKeycapIds?: (string | null)[];
+  lastSeenAt?: number;
 }
 
 function loadGame() {
@@ -231,27 +297,44 @@ function loadGame() {
       const s: SaveData = JSON.parse(raw);
       const districts: District[] = DISTRICT_DATA.map(d => {
         const sd = s.districts.find(x => x.id === d.id);
-        return { ...d, currentHp: sd?.hp ?? d.maxHp, owner: sd?.owner ?? null };
+        const maxHp = d.maxHp * HP_SCALE;
+        return { ...d, maxHp, currentHp: Math.min(sd?.hp ?? maxHp, maxHp), owner: sd?.owner ?? null };
       });
       return {
         districts, taps: s.taps, bestCombo: s.bestCombo, seasonEnd: s.seasonEnd,
         keycapCount: s.keycapCount ?? 1,
         activeKeycapIds: s.activeKeycapIds ?? [null, null, null, null],
+        lastSeenAt: s.lastSeenAt ?? Date.now(),
       };
     }
   } catch { /* corrupt save */ }
 
   const districts: District[] = DISTRICT_DATA.map((d) => {
+    const maxHp = d.maxHp * HP_SCALE;
     if (d.id % 4 === 1 && d.id >= 4) {
-      return { ...d, currentHp: d.maxHp, owner: NPC_NAMES[d.id % NPC_NAMES.length] };
+      return { ...d, maxHp, currentHp: maxHp, owner: NPC_NAMES[d.id % NPC_NAMES.length] };
     }
-    return { ...d, currentHp: d.maxHp, owner: null };
+    return { ...d, maxHp, currentHp: maxHp, owner: null };
   });
   return {
     districts, taps: 0, bestCombo: 0, seasonEnd: Date.now() + 7 * 86400000,
     keycapCount: 1,
     activeKeycapIds: [null, null, null, null] as (string | null)[],
+    lastSeenAt: Date.now(),
   };
+}
+
+// 로드 직후, 마지막 접속 이후 흐른 시간만큼 NPC 활동을 반영해서 게임을 시작한다.
+function initGame() {
+  const g = loadGame();
+  const elapsed = Date.now() - g.lastSeenAt;
+  if (elapsed < NPC_MIN_OFFLINE_MS) {
+    return { ...g, report: null as InvasionReport | null };
+  }
+  const { districts, thefts, otherConquests } = simulateNpcOffline(g.districts, elapsed);
+  const report: InvasionReport | null =
+    thefts.length > 0 || otherConquests > 0 ? { thefts, otherConquests } : null;
+  return { ...g, districts, report };
 }
 
 function saveGame(
@@ -262,6 +345,7 @@ function saveGame(
     const data: SaveData = {
       districts: districts.map(d => ({ id: d.id, hp: d.currentHp, owner: d.owner })),
       taps, bestCombo, seasonEnd, keycapCount, activeKeycapIds,
+      lastSeenAt: Date.now(),
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
   } catch { /* storage full */ }
@@ -285,7 +369,7 @@ function saveKeycapDesignsToStorage(designs: KeycapDesign[]) {
 // ═══════════════════════════════════════════════════════════
 
 export default function App() {
-  const [init] = useState(loadGame);
+  const [init] = useState(initGame);
   const [districts, setDistricts] = useState<District[]>(init.districts);
   const [selectedId, setSelectedId] = useState(() => {
     const t = init.districts.find(d => !d.owner) ?? init.districts[0];
@@ -295,12 +379,18 @@ export default function App() {
   const [totalTaps, setTotalTaps] = useState(init.taps);
   const [bestCombo, setBestCombo] = useState(init.bestCombo);
   const [particles, setParticles] = useState<Particle[]>([]);
-  const [feed, setFeed] = useState<FeedEntry[]>([
+  const [feed, setFeed] = useState<FeedEntry[]>(() => [
+    ...(init.report?.thefts.slice(0, 5).map((t, i) => ({
+      id: 2 + i,
+      text: `💥 ${t.npc} → [${t.districtName}] 점령!`,
+      type: 'npc' as const,
+    })) ?? []),
     { id: 1, text: '⚔ 시즌 1 시작! 대한민국을 점령하세요!', type: 'system' },
   ]);
   const [conquestName, setConquestName] = useState<string | null>(null);
   const [timeLeft, setTimeLeft] = useState('');
   const [flashId, setFlashId] = useState<number | null>(null);
+  const [invasionReport, setInvasionReport] = useState<InvasionReport | null>(init.report);
 
   const [keycapCount, setKeycapCount] = useState(init.keycapCount);
   const [keycapDesigns, setKeycapDesigns] = useState<KeycapDesign[]>(loadKeycapDesigns);
@@ -346,34 +436,61 @@ export default function App() {
     saveKeycapDesignsToStorage(keycapDesigns);
   }, [keycapDesigns]);
 
-  // ── NPC Simulation ───────────────────────────────────
+  // ── NPC: 부재 중에만 활동 ────────────────────────────
+  // 앱을 보고 있는 동안 NPC는 완전히 잠들어 있다. 탭이 백그라운드로
+  // 가거나 앱이 닫히면 그때부터 NPC가 깨어나고, 돌아왔을 때 그 사이의
+  // 활동을 일괄 반영한 뒤 뺏긴 영토를 침공 리포트로 알려준다.
+  const districtsRef = useRef(districts);
+  useEffect(() => { districtsRef.current = districts; }, [districts]);
+
+  const saveNowRef = useRef(() => {});
   useEffect(() => {
-    let timer: number;
-    function tick() {
-      timer = window.setTimeout(() => {
-        const npc = NPC_NAMES[Math.floor(Math.random() * NPC_NAMES.length)];
-        setDistricts(prev => {
-          const targets = prev.filter(d => d.owner !== npc);
-          if (!targets.length) return prev;
-          const target = targets[Math.floor(Math.random() * targets.length)];
-          const dmg = 15 + Math.floor(Math.random() * 25);
-          const hp = Math.max(0, target.currentHp - dmg);
-          const won = hp <= 0;
-          const id = ++feedId.current;
-          setFeed(f => [
-            { id, text: won ? `💥 ${npc} → [${target.name}] 점령!` : `⚡ ${npc} → [${target.name}] -${dmg}`, type: 'npc' as const },
-            ...f,
-          ].slice(0, 30));
-          if (won && target.owner === 'player') sound.current.npcAlert();
-          return prev.map(d => d.id === target.id
-            ? { ...d, currentHp: won ? d.maxHp : hp, owner: won ? npc : d.owner }
-            : d);
-        });
-        tick();
-      }, 4000 + Math.random() * 6000);
-    }
-    tick();
-    return () => clearTimeout(timer);
+    saveNowRef.current = () =>
+      saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds);
+  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds]);
+
+  const hiddenAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    const applyOffline = () => {
+      if (hiddenAtRef.current === null) return;
+      const elapsed = Date.now() - hiddenAtRef.current;
+      hiddenAtRef.current = null;
+      if (elapsed < NPC_MIN_OFFLINE_MS) return;
+      const { districts: after, thefts, otherConquests } =
+        simulateNpcOffline(districtsRef.current, elapsed);
+      if (!thefts.length && !otherConquests) return;
+      setDistricts(after);
+      if (thefts.length) {
+        setFeed(f => [
+          ...thefts.slice(0, 5).map(t => ({
+            id: ++feedId.current,
+            text: `💥 ${t.npc} → [${t.districtName}] 점령!`,
+            type: 'npc' as const,
+          })),
+          ...f,
+        ].slice(0, 30));
+        setInvasionReport({ thefts, otherConquests });
+        sound.current.npcAlert();
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenAtRef.current = Date.now();
+        saveNowRef.current();
+      } else {
+        applyOffline();
+      }
+    };
+    const onPageHide = () => {
+      hiddenAtRef.current = Date.now();
+      saveNowRef.current();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+    };
   }, []);
 
   // ── Helpers ──────────────────────────────────────────
@@ -799,6 +916,113 @@ export default function App() {
               <div style={{ color: '#fbbf24', fontSize: 11, fontWeight: 700, letterSpacing: 3, marginTop: 4 }}>
                 점 령 완 료
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Invasion Report (부재 중 침공 알림) ──── */}
+      <AnimatePresence>
+        {invasionReport && (
+          <motion.div
+            className="fixed inset-0 flex items-center justify-center"
+            style={{ zIndex: 85 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <div
+              className="absolute inset-0"
+              style={{ background: 'rgba(0,0,0,0.75)' }}
+              onClick={() => setInvasionReport(null)}
+            />
+            <motion.div
+              className="relative"
+              initial={{ scale: 0.7, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.8, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 22 }}
+              style={{
+                width: 'min(320px, 85vw)',
+                background: '#0a0a1e',
+                border: '4px solid',
+                borderColor: '#ff6b6b #661111 #661111 #ff6b6b',
+                padding: '20px 20px 16px',
+                textAlign: 'center',
+                boxShadow: '0 0 40px rgba(255,107,107,0.3)',
+              }}
+            >
+              <div style={{ fontSize: 28, marginBottom: 6 }}>🚨</div>
+              <div style={{ color: '#ff6b6b', fontSize: 15, fontWeight: 900, letterSpacing: 2, marginBottom: 4 }}>
+                침공 알림
+              </div>
+              {invasionReport.thefts.length > 0 ? (
+                <>
+                  <div style={{ color: '#ccccee', fontSize: 11, marginBottom: 10 }}>
+                    자리 비운 사이 영토 <span style={{ color: '#ff6b6b', fontWeight: 900 }}>{invasionReport.thefts.length}개</span>를 뺏겼습니다!
+                  </div>
+                  <div style={{
+                    display: 'flex', flexDirection: 'column', gap: 4,
+                    maxHeight: 150, overflowY: 'auto', marginBottom: 12,
+                  }}>
+                    {invasionReport.thefts.slice(0, 6).map(t => (
+                      <div key={t.districtId} style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: '5px 8px',
+                        background: 'rgba(255,107,107,0.07)',
+                        border: '2px solid rgba(255,107,107,0.15)',
+                      }}>
+                        <span style={{ fontSize: 10, fontWeight: 900, color: ownerColor(t.npc) }}>{t.npc}</span>
+                        <span style={{ fontSize: 10, color: '#ccccee' }}>[{t.districtName}]</span>
+                      </div>
+                    ))}
+                    {invasionReport.thefts.length > 6 && (
+                      <div style={{ fontSize: 9, color: '#5a5a8a' }}>
+                        외 {invasionReport.thefts.length - 6}개…
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {
+                      const first = invasionReport.thefts[0];
+                      setSelectedId(first.districtId);
+                      setInvasionReport(null);
+                    }}
+                    style={{
+                      width: '100%', padding: '10px 0',
+                      background: '#ff6b6b',
+                      border: '3px solid',
+                      borderColor: '#ff9999 #cc3333 #cc3333 #ff9999',
+                      color: '#0a0a1e',
+                      fontSize: 12, fontWeight: 900, letterSpacing: 2,
+                      cursor: 'pointer',
+                      fontFamily: "'Courier New', monospace",
+                    }}
+                  >
+                    ⚔ 되찾으러 가기
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div style={{ color: '#ccccee', fontSize: 11, marginBottom: 12 }}>
+                    자리 비운 사이 NPC들이 <span style={{ color: '#fbbf24', fontWeight: 900 }}>{invasionReport.otherConquests}개</span> 지역을 점령했습니다
+                  </div>
+                  <button
+                    onClick={() => setInvasionReport(null)}
+                    style={{
+                      width: '100%', padding: '10px 0',
+                      background: '#1a1a35',
+                      border: '3px solid #2a2a45',
+                      color: '#ccccee',
+                      fontSize: 12, fontWeight: 900, letterSpacing: 2,
+                      cursor: 'pointer',
+                      fontFamily: "'Courier New', monospace",
+                    }}
+                  >
+                    확인
+                  </button>
+                </>
+              )}
             </motion.div>
           </motion.div>
         )}
