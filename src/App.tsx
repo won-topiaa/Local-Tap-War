@@ -12,7 +12,7 @@ import { PowerUpIndicator } from './components/PowerUpIndicator';
 import { StatsPanel } from './components/StatsPanel';
 import { SettingsPanel, type GameSettings } from './components/SettingsPanel';
 import { Onboarding } from './components/Onboarding';
-import { KeycapButton } from './components/KeycapButton';
+import { KeycapButton, KeycapStyles } from './components/KeycapButton';
 import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
 import { neighborhoods as initialNeighborhoods } from './data/neighborhoods';
 import { calculateLevel } from './data/levels';
@@ -105,8 +105,9 @@ export default function App() {
   const [selectedNeighborhood, setSelectedNeighborhood] = useState(MY_NEIGHBORHOOD_ID);
   const [showOnboarding, setShowOnboarding] = useState(!saved.hasOnboarded);
   const [keycapDesigns, setKeycapDesigns] = useLocalStorage<KeycapDesign[]>('tapwar_keycap_designs', []);
-  const [activeKeycapId, setActiveKeycapId] = useLocalStorage<string | null>('tapwar_active_keycap', null);
+  const [activeKeycapIds, setActiveKeycapIds] = useLocalStorage<(string | null)[]>('tapwar_active_keycaps', [null, null, null]);
   const [showDesigner, setShowDesigner] = useState(false);
+  const [designerSlot, setDesignerSlot] = useState(0);
 
   const comboTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevLevelRef = useRef(calculateLevel(saved.totalXp).level);
@@ -128,13 +129,14 @@ export default function App() {
   const tapCoreRef = useRef<(e: React.MouseEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => void>(() => {});
 
   const handleAutoTap = useCallback(() => {
-    const btn = document.getElementById('tap-button');
+    const idx = Math.floor(Math.random() * 3);
+    const btn = document.getElementById(`tap-button-${idx}`);
     if (btn) {
       const rect = btn.getBoundingClientRect();
       const fakeEvent = {
         preventDefault: () => {},
-        clientX: rect.left + rect.width / 2 + (Math.random() - 0.5) * 40,
-        clientY: rect.top + rect.height / 2 + (Math.random() - 0.5) * 20,
+        clientX: rect.left + rect.width / 2 + (Math.random() - 0.5) * 30,
+        clientY: rect.top + rect.height / 2 + (Math.random() - 0.5) * 15,
       } as unknown as React.MouseEvent<HTMLButtonElement>;
       tapCoreRef.current(fakeEvent);
     }
@@ -378,19 +380,29 @@ export default function App() {
 
   const selectedInfo = neighborhoodData.find((n) => n.id === selectedNeighborhood);
 
-  const activeKeycapImage = useMemo(() => {
-    if (!activeKeycapId) return null;
-    return keycapDesigns.find((d) => d.id === activeKeycapId)?.imageData ?? null;
-  }, [activeKeycapId, keycapDesigns]);
+  const keycapImages = useMemo(() => {
+    return activeKeycapIds.map((id) => {
+      if (!id) return null;
+      return keycapDesigns.find((d) => d.id === id)?.imageData ?? null;
+    });
+  }, [activeKeycapIds, keycapDesigns]);
 
   const handleSaveDesign = useCallback((design: KeycapDesign) => {
     setKeycapDesigns((prev) => [...prev, design]);
   }, [setKeycapDesigns]);
 
+  const handleSelectSlotDesign = useCallback((slotIndex: number, id: string | null) => {
+    setActiveKeycapIds((prev) => {
+      const next = [...prev];
+      next[slotIndex] = id;
+      return next;
+    });
+  }, [setActiveKeycapIds]);
+
   const handleDeleteDesign = useCallback((id: string) => {
     setKeycapDesigns((prev) => prev.filter((d) => d.id !== id));
-    setActiveKeycapId((prev) => (prev === id ? null : prev));
-  }, [setKeycapDesigns, setActiveKeycapId]);
+    setActiveKeycapIds((prev) => prev.map((v) => (v === id ? null : v)));
+  }, [setKeycapDesigns, setActiveKeycapIds]);
 
   // --- Onboarding ---
   if (showOnboarding) {
@@ -584,14 +596,28 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex justify-center">
-            <KeycapButton
-              imageUrl={activeKeycapImage}
-              isFever={isFever}
-              label={isFever ? 'FEVER x3' : 'TAP'}
-              onTap={handleTapCore}
-              onCustomize={() => setShowDesigner(true)}
-            />
+          <div className="flex justify-center gap-3">
+            {[0, 1, 2].map((i) => (
+              <KeycapButton
+                key={i}
+                buttonId={`tap-button-${i}`}
+                imageUrl={keycapImages[i] ?? null}
+                isFever={isFever}
+                label={isFever ? 'FEVER' : 'TAP'}
+                compact
+                onTap={handleTapCore}
+              />
+            ))}
+          </div>
+          <div className="flex justify-center mt-2">
+            <button
+              onClick={() => { setDesignerSlot(0); setShowDesigner(true); }}
+              className={`text-[11px] font-bold px-3 py-1 rounded-full transition-colors ${
+                isFever ? 'text-indigo-300 bg-white/5 active:bg-white/10' : 'text-gray-400 bg-gray-100 active:bg-gray-200'
+              }`}
+            >
+              🎨 키캡 꾸미기
+            </button>
           </div>
         </div>
       </div>
@@ -618,15 +644,18 @@ export default function App() {
         {showDesigner && (
           <KeycapDesigner
             designs={keycapDesigns}
-            activeDesignId={activeKeycapId}
+            activeDesignIds={activeKeycapIds}
+            initialSlot={designerSlot}
             onSaveDesign={handleSaveDesign}
-            onSelectDesign={setActiveKeycapId}
+            onSelectDesign={handleSelectSlotDesign}
             onDeleteDesign={handleDeleteDesign}
             onClose={() => setShowDesigner(false)}
             isFever={isFever}
           />
         )}
       </AnimatePresence>
+
+      <KeycapStyles />
 
       <style>{`
         .neighborhood-label {

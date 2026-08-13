@@ -10,9 +10,10 @@ export interface KeycapDesign {
 
 interface KeycapDesignerProps {
   designs: KeycapDesign[];
-  activeDesignId: string | null;
+  activeDesignIds: (string | null)[];
+  initialSlot: number;
   onSaveDesign: (design: KeycapDesign) => void;
-  onSelectDesign: (id: string | null) => void;
+  onSelectDesign: (slotIndex: number, id: string | null) => void;
   onDeleteDesign: (id: string) => void;
   onClose: () => void;
   isFever: boolean;
@@ -49,9 +50,15 @@ function resizeImage(file: File, maxSize: number): Promise<string> {
   });
 }
 
+function getDesignImage(designs: KeycapDesign[], id: string | null): string | null {
+  if (!id) return null;
+  return designs.find((d) => d.id === id)?.imageData ?? null;
+}
+
 export function KeycapDesigner({
   designs,
-  activeDesignId,
+  activeDesignIds,
+  initialSlot,
   onSaveDesign,
   onSelectDesign,
   onDeleteDesign,
@@ -61,6 +68,7 @@ export function KeycapDesigner({
   const [preview, setPreview] = useState<string | null>(null);
   const [designName, setDesignName] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState(initialSlot);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -92,10 +100,12 @@ export function KeycapDesigner({
       createdAt: Date.now(),
     };
     onSaveDesign(design);
-    onSelectDesign(design.id);
+    onSelectDesign(selectedSlot, design.id);
     setPreview(null);
     setDesignName('');
-  }, [preview, designName, designs.length, onSaveDesign, onSelectDesign]);
+  }, [preview, designName, designs.length, onSaveDesign, onSelectDesign, selectedSlot]);
+
+  const currentDesignId = activeDesignIds[selectedSlot] ?? null;
 
   return (
     <motion.div
@@ -104,10 +114,8 @@ export function KeycapDesigner({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
-      {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
-      {/* Sheet */}
       <motion.div
         className={`relative w-full max-w-md max-h-[85vh] rounded-t-3xl overflow-y-auto ${
           isFever ? 'bg-indigo-950' : 'bg-white'
@@ -117,7 +125,6 @@ export function KeycapDesigner({
         exit={{ y: '100%' }}
         transition={{ type: 'spring', damping: 25, stiffness: 300 }}
       >
-        {/* Handle */}
         <div className="flex justify-center pt-3 pb-2">
           <div className={`w-10 h-1 rounded-full ${isFever ? 'bg-white/20' : 'bg-gray-300'}`} />
         </div>
@@ -126,6 +133,41 @@ export function KeycapDesigner({
           <h2 className={`text-lg font-black mb-4 ${isFever ? 'text-white' : 'text-gray-800'}`}>
             🎨 키캡 디자인
           </h2>
+
+          {/* Slot selector */}
+          <div className="mb-5">
+            <p className={`text-xs mb-2 ${isFever ? 'text-indigo-300' : 'text-gray-500'}`}>
+              꾸밀 키캡 선택
+            </p>
+            <div className="flex justify-center gap-4">
+              {[0, 1, 2].map((slot) => {
+                const img = getDesignImage(designs, activeDesignIds[slot] ?? null);
+                return (
+                  <button
+                    key={slot}
+                    onClick={() => setSelectedSlot(slot)}
+                    className={`relative flex flex-col items-center gap-1 p-2 rounded-xl transition-all ${
+                      selectedSlot === slot
+                        ? (isFever ? 'bg-yellow-400/20 ring-2 ring-yellow-400 scale-105' : 'bg-blue-50 ring-2 ring-blue-500 scale-105')
+                        : (isFever ? 'bg-white/5' : 'bg-gray-50')
+                    }`}
+                  >
+                    <div className="keycap-slot-body">
+                      <div
+                        className="keycap-slot-top"
+                        style={img ? { backgroundImage: `url(${img})` } : undefined}
+                      >
+                        {!img && <span className="text-lg">👊</span>}
+                      </div>
+                    </div>
+                    <span className={`text-[10px] font-bold ${isFever ? 'text-white' : 'text-gray-600'}`}>
+                      #{slot + 1}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           {/* Upload section */}
           {!preview ? (
@@ -170,13 +212,11 @@ export function KeycapDesigner({
               />
             </div>
           ) : (
-            /* Preview + save */
             <div className="mb-6">
               <p className={`text-xs mb-3 ${isFever ? 'text-indigo-300' : 'text-gray-500'}`}>
-                미리보기
+                미리보기 (키캡 #{selectedSlot + 1}에 적용)
               </p>
               <div className="flex items-start gap-4">
-                {/* Mini keycap preview */}
                 <div className="flex-shrink-0">
                   <div className="keycap-preview-body">
                     <div
@@ -231,12 +271,11 @@ export function KeycapDesigner({
               내 키캡 컬렉션 ({designs.length})
             </h3>
 
-            {/* Default (no image) option */}
             <div className="grid grid-cols-4 gap-3">
               <button
-                onClick={() => onSelectDesign(null)}
+                onClick={() => onSelectDesign(selectedSlot, null)}
                 className={`flex flex-col items-center gap-1 p-2 rounded-xl transition-colors ${
-                  activeDesignId === null
+                  currentDesignId === null
                     ? (isFever ? 'bg-yellow-400/20 ring-2 ring-yellow-400' : 'bg-blue-50 ring-2 ring-blue-500')
                     : (isFever ? 'bg-white/5' : 'bg-gray-50')
                 }`}
@@ -254,9 +293,9 @@ export function KeycapDesigner({
               {designs.map((d) => (
                 <div key={d.id} className="relative">
                   <button
-                    onClick={() => onSelectDesign(d.id)}
+                    onClick={() => onSelectDesign(selectedSlot, d.id)}
                     className={`w-full flex flex-col items-center gap-1 p-2 rounded-xl transition-colors ${
-                      activeDesignId === d.id
+                      currentDesignId === d.id
                         ? (isFever ? 'bg-yellow-400/20 ring-2 ring-yellow-400' : 'bg-blue-50 ring-2 ring-blue-500')
                         : (isFever ? 'bg-white/5' : 'bg-gray-50')
                     }`}
@@ -307,6 +346,31 @@ export function KeycapDesigner({
             border-radius: 10px;
             background-size: cover;
             background-position: center;
+            box-shadow:
+              inset 0 1px 0 rgba(255,255,255,0.4),
+              inset 0 -1px 1px rgba(0,0,0,0.05);
+          }
+          .keycap-slot-body {
+            width: 54px;
+            height: 54px;
+            border-radius: 10px;
+            background: linear-gradient(to bottom, #c8ccd0, #9ea3a8);
+            box-shadow:
+              0 3px 0 0 #787d82,
+              0 4px 0 0 #6b7075,
+              0 5px 8px rgba(0,0,0,0.2);
+            padding: 4px;
+          }
+          .keycap-slot-top {
+            width: 100%;
+            height: 100%;
+            border-radius: 7px;
+            background-size: cover;
+            background-position: center;
+            background-color: #e8ecf0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             box-shadow:
               inset 0 1px 0 rgba(255,255,255,0.4),
               inset 0 -1px 1px rgba(0,0,0,0.05);
