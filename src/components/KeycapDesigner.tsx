@@ -12,6 +12,7 @@ interface KeycapDesignerProps {
   designs: KeycapDesign[];
   activeDesignIds: (string | null)[];
   initialSlot: number;
+  slotCount: number;
   onSaveDesign: (design: KeycapDesign) => void;
   onSelectDesign: (slotIndex: number, id: string | null) => void;
   onDeleteDesign: (id: string) => void;
@@ -59,6 +60,7 @@ export function KeycapDesigner({
   designs,
   activeDesignIds,
   initialSlot,
+  slotCount,
   onSaveDesign,
   onSelectDesign,
   onDeleteDesign,
@@ -140,7 +142,7 @@ export function KeycapDesigner({
               꾸밀 키캡 선택
             </p>
             <div className="flex justify-center gap-4">
-              {[0, 1, 2].map((slot) => {
+              {Array.from({length: slotCount}, (_, i) => i).map((slot) => {
                 const img = getDesignImage(designs, activeDesignIds[slot] ?? null);
                 return (
                   <button

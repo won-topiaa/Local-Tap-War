@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
 
 // ═══════════════════════════════════════════════════════════
 // Types
@@ -72,6 +73,13 @@ const DISTRICT_DATA: DData[] = [
   D(53,'제주시','제주',12,2,140), D(54,'서귀포','제주',12,3,100),
 ];
 
+const KEYCAP_SIZE = {
+  1: { body: 152, margin: 7, border: 4, borderInner: 3, emoji: 40, text: 11, spacing: 4, press: 6, shadow: 8 },
+  2: { body: 120, margin: 6, border: 3, borderInner: 2, emoji: 32, text: 9, spacing: 3, press: 5, shadow: 6 },
+  3: { body: 96, margin: 5, border: 3, borderInner: 2, emoji: 24, text: 8, spacing: 2, press: 4, shadow: 5 },
+  4: { body: 80, margin: 4, border: 2, borderInner: 2, emoji: 20, text: 7, spacing: 2, press: 3, shadow: 4 },
+} as const;
+
 // ═══════════════════════════════════════════════════════════
 // 8-bit Sound Engine
 // ═══════════════════════════════════════════════════════════
@@ -134,12 +142,15 @@ function formatTime(ms: number): string {
 // ═══════════════════════════════════════════════════════════
 
 const SAVE_KEY = 'tapwar_pixel_v1';
+const KEYCAP_DESIGNS_KEY = 'tapwar_keycap_designs_v1';
 
 interface SaveData {
   districts: { id: number; hp: number; owner: string | null }[];
   taps: number;
   bestCombo: number;
   seasonEnd: number;
+  keycapCount?: number;
+  activeKeycapIds?: (string | null)[];
 }
 
 function loadGame() {
@@ -151,7 +162,11 @@ function loadGame() {
         const sd = s.districts.find(x => x.id === d.id);
         return { ...d, currentHp: sd?.hp ?? d.maxHp, owner: sd?.owner ?? null };
       });
-      return { districts, taps: s.taps, bestCombo: s.bestCombo, seasonEnd: s.seasonEnd };
+      return {
+        districts, taps: s.taps, bestCombo: s.bestCombo, seasonEnd: s.seasonEnd,
+        keycapCount: s.keycapCount ?? 1,
+        activeKeycapIds: s.activeKeycapIds ?? [null, null, null, null],
+      };
     }
   } catch { /* corrupt save */ }
 
@@ -161,16 +176,36 @@ function loadGame() {
     }
     return { ...d, currentHp: d.maxHp, owner: null };
   });
-  return { districts, taps: 0, bestCombo: 0, seasonEnd: Date.now() + 7 * 86400000 };
+  return {
+    districts, taps: 0, bestCombo: 0, seasonEnd: Date.now() + 7 * 86400000,
+    keycapCount: 1,
+    activeKeycapIds: [null, null, null, null] as (string | null)[],
+  };
 }
 
-function saveGame(districts: District[], taps: number, bestCombo: number, seasonEnd: number) {
+function saveGame(
+  districts: District[], taps: number, bestCombo: number, seasonEnd: number,
+  keycapCount: number, activeKeycapIds: (string | null)[],
+) {
   try {
     const data: SaveData = {
       districts: districts.map(d => ({ id: d.id, hp: d.currentHp, owner: d.owner })),
-      taps, bestCombo, seasonEnd,
+      taps, bestCombo, seasonEnd, keycapCount, activeKeycapIds,
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch { /* storage full */ }
+}
+
+function loadKeycapDesigns(): KeycapDesign[] {
+  try {
+    const raw = localStorage.getItem(KEYCAP_DESIGNS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveKeycapDesignsToStorage(designs: KeycapDesign[]) {
+  try {
+    localStorage.setItem(KEYCAP_DESIGNS_KEY, JSON.stringify(designs));
   } catch { /* storage full */ }
 }
 
@@ -196,17 +231,31 @@ export default function App() {
   const [timeLeft, setTimeLeft] = useState('');
   const [flashId, setFlashId] = useState<number | null>(null);
 
+  const [keycapCount, setKeycapCount] = useState(init.keycapCount);
+  const [keycapDesigns, setKeycapDesigns] = useState<KeycapDesign[]>(loadKeycapDesigns);
+  const [activeKeycapIds, setActiveKeycapIds] = useState<(string | null)[]>(init.activeKeycapIds);
+  const [showDesigner, setShowDesigner] = useState(false);
+  const [designerSlot, setDesignerSlot] = useState(0);
+
   const comboTimer = useRef(0);
   const feedId = useRef(10);
   const particleId = useRef(0);
   const sound = useRef(createPixelSound());
   const seasonEnd = useRef(init.seasonEnd);
   const comboRef = useRef(0);
-  const keycapRef = useRef<HTMLButtonElement>(null);
+  const keycapRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const selected = districts.find(d => d.id === selectedId) ?? null;
   const playerCount = districts.filter(d => d.owner === 'player').length;
   const mult = comboMultiplier(combo);
+  const isFever = combo >= 30;
+  const sz = KEYCAP_SIZE[keycapCount as keyof typeof KEYCAP_SIZE];
+
+  const getDesignImage = useCallback((slotIndex: number): string | null => {
+    const designId = activeKeycapIds[slotIndex];
+    if (!designId) return null;
+    return keycapDesigns.find(d => d.id === designId)?.imageData ?? null;
+  }, [activeKeycapIds, keycapDesigns]);
 
   // ── Season Timer ─────────────────────────────────────
   useEffect(() => {
@@ -216,9 +265,14 @@ export default function App() {
 
   // ── Auto-save ────────────────────────────────────────
   useEffect(() => {
-    const t = setTimeout(() => saveGame(districts, totalTaps, bestCombo, seasonEnd.current), 500);
+    const t = setTimeout(() => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds), 500);
     return () => clearTimeout(t);
-  }, [districts, totalTaps, bestCombo]);
+  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds]);
+
+  // ── Save keycap designs ──────────────────────────────
+  useEffect(() => {
+    saveKeycapDesignsToStorage(keycapDesigns);
+  }, [keycapDesigns]);
 
   // ── NPC Simulation ───────────────────────────────────
   useEffect(() => {
@@ -266,7 +320,7 @@ export default function App() {
   }, []);
 
   // ── Tap Handler ──────────────────────────────────────
-  const handleTap = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+  const handleTap = useCallback((e: React.MouseEvent | React.TouchEvent, keycapIdx: number) => {
     e.preventDefault();
 
     setDistricts(prev => {
@@ -287,7 +341,7 @@ export default function App() {
       sound.current.tap();
       if (navigator.vibrate) navigator.vibrate(12);
 
-      const el = keycapRef.current;
+      const el = keycapRefs.current[keycapIdx];
       if (el) {
         const rect = el.getBoundingClientRect();
         const pid = ++particleId.current;
@@ -321,6 +375,24 @@ export default function App() {
       return prev.map(d => d.id === target.id ? { ...d, currentHp: hp } : d);
     });
   }, [selectedId, bestCombo, addFeed, nextTarget]);
+
+  // ── Keycap Design Handlers ───────────────────────────
+  const handleSaveDesign = useCallback((design: KeycapDesign) => {
+    setKeycapDesigns(prev => [...prev, design]);
+  }, []);
+
+  const handleSelectDesign = useCallback((slotIndex: number, id: string | null) => {
+    setActiveKeycapIds(prev => {
+      const next = [...prev];
+      next[slotIndex] = id;
+      return next;
+    });
+  }, []);
+
+  const handleDeleteDesign = useCallback((id: string) => {
+    setKeycapDesigns(prev => prev.filter(d => d.id !== id));
+    setActiveKeycapIds(prev => prev.map(aid => aid === id ? null : aid));
+  }, []);
 
   // ── Derived ──────────────────────────────────────────
   const hpPct = selected ? (selected.currentHp / selected.maxHp) * 100 : 0;
@@ -446,7 +518,7 @@ export default function App() {
       {/* ── Keycap Area ─────────────────────────── */}
       <div className="flex-1 flex flex-col items-center justify-center relative min-h-0">
         {/* Combo display */}
-        <div className="flex-none mb-2 text-center" style={{ minHeight: 28 }}>
+        <div className="flex-none mb-1 text-center" style={{ minHeight: 28 }}>
           {combo > 0 && (
             <motion.div
               key={combo}
@@ -468,30 +540,103 @@ export default function App() {
           )}
         </div>
 
-        {/* Keycap Button */}
-        <motion.button
-          ref={keycapRef}
-          id="tap-button"
-          onMouseDown={handleTap}
-          onTouchStart={handleTap}
-          className="pixel-keycap-btn"
-          style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', border: 'none', cursor: 'pointer' }}
-          whileTap={{ y: 6, transition: { type: 'spring', stiffness: 800, damping: 20 } }}
-          animate={combo >= 30 ? { boxShadow: ['0 8px 0 #1a0030, 0 0 0 rgba(139,92,246,0)', '0 8px 0 #1a0030, 0 0 30px rgba(139,92,246,0.5)'] } : {}}
-          transition={combo >= 30 ? { repeat: Infinity, duration: 0.6, repeatType: 'reverse' as const } : {}}
-        >
-          <div className={`pixel-keycap-body ${combo >= 30 ? 'pixel-keycap-body--fever' : ''}`}>
-            <div className={`pixel-keycap-face ${combo >= 30 ? 'pixel-keycap-face--fever' : ''}`}>
-              <span style={{ fontSize: 40, lineHeight: 1 }}>{combo >= 30 ? '🔥' : '⚔️'}</span>
-              <span style={{
-                fontSize: 11, fontWeight: 900, letterSpacing: 4,
-                color: combo >= 30 ? '#fbbf24' : '#8888aa',
-              }}>
-                TAP!
-              </span>
-            </div>
+        {/* Keycap settings row */}
+        <div className="flex-none flex items-center justify-center gap-2 mb-2">
+          <div className="flex items-center gap-0.5">
+            {([1, 2, 3, 4] as const).map(n => (
+              <button
+                key={n}
+                onClick={() => setKeycapCount(n)}
+                style={{
+                  width: 22, height: 22,
+                  background: keycapCount === n ? PLAYER_COLOR : '#1a1a35',
+                  color: keycapCount === n ? '#0a0a1e' : '#5a5a8a',
+                  border: `2px solid ${keycapCount === n ? PLAYER_COLOR : '#2a2a45'}`,
+                  fontSize: 10, fontWeight: 900,
+                  cursor: 'pointer',
+                  fontFamily: 'monospace',
+                }}
+              >
+                {n}
+              </button>
+            ))}
           </div>
-        </motion.button>
+          <button
+            onClick={() => { setDesignerSlot(0); setShowDesigner(true); }}
+            style={{
+              width: 28, height: 22,
+              background: '#1a1a35',
+              border: '2px solid #2a2a45',
+              fontSize: 12,
+              cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            🎨
+          </button>
+        </div>
+
+        {/* Keycap Buttons */}
+        <div className="flex items-end justify-center" style={{ gap: keycapCount <= 2 ? 16 : 10 }}>
+          {Array.from({ length: keycapCount }, (_, i) => {
+            const designImg = getDesignImage(i);
+            return (
+              <motion.button
+                key={i}
+                ref={(el) => { keycapRefs.current[i] = el; }}
+                id={i === 0 ? 'tap-button' : undefined}
+                onMouseDown={(e) => handleTap(e, i)}
+                onTouchStart={(e) => handleTap(e, i)}
+                className="pixel-keycap-btn"
+                style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', border: 'none', cursor: 'pointer' }}
+                whileTap={{ y: sz.press, transition: { type: 'spring', stiffness: 800, damping: 20 } }}
+                animate={isFever ? { boxShadow: [`0 ${sz.shadow}px 0 #1a0030, 0 0 0 rgba(139,92,246,0)`, `0 ${sz.shadow}px 0 #1a0030, 0 0 20px rgba(139,92,246,0.5)`] } : {}}
+                transition={isFever ? { repeat: Infinity, duration: 0.6, repeatType: 'reverse' as const } : {}}
+              >
+                <div
+                  className="pixel-keycap-body"
+                  style={{
+                    width: sz.body, height: sz.body,
+                    borderWidth: sz.border,
+                    boxShadow: isFever
+                      ? `0 ${sz.shadow}px 0 0 #1a0030, 0 ${sz.shadow + 2}px 0 0 #100020, 0 0 20px rgba(139,92,246,0.3)`
+                      : `0 ${sz.shadow}px 0 0 #18182a, 0 ${sz.shadow + 2}px 0 0 #101020`,
+                    background: isFever ? '#4a2070' : undefined,
+                    borderColor: isFever ? '#7c3aed #2a0845 #2a0845 #7c3aed' : undefined,
+                  }}
+                >
+                  <div
+                    className="pixel-keycap-face"
+                    style={{
+                      top: sz.margin, left: sz.margin, right: sz.margin, bottom: sz.margin,
+                      borderWidth: sz.borderInner,
+                      background: isFever ? '#5b2d8a' : undefined,
+                      borderColor: isFever ? '#8b5cf6 #3a1060 #3a1060 #8b5cf6' : undefined,
+                    }}
+                  >
+                    {designImg ? (
+                      <div className="pixel-keycap-img" style={{ backgroundImage: `url(${designImg})` }} />
+                    ) : (
+                      <span style={{ fontSize: sz.emoji, lineHeight: 1 }}>{isFever ? '🔥' : '⚔️'}</span>
+                    )}
+                    <span style={{
+                      position: 'absolute',
+                      bottom: keycapCount >= 3 ? 2 : 4,
+                      left: 0, right: 0,
+                      textAlign: 'center',
+                      fontSize: sz.text, fontWeight: 900, letterSpacing: sz.spacing,
+                      color: isFever ? '#fbbf24' : designImg ? '#fff' : '#8888aa',
+                      textShadow: designImg ? '0 1px 3px rgba(0,0,0,0.8)' : 'none',
+                      pointerEvents: 'none',
+                    }}>
+                      TAP!
+                    </span>
+                  </div>
+                </div>
+              </motion.button>
+            );
+          })}
+        </div>
 
         {isOwned && (
           <div className="text-[10px] mt-2" style={{ color: '#5a5a8a' }}>
@@ -560,6 +705,23 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      {/* ── KeycapDesigner Modal ────────────────── */}
+      <AnimatePresence>
+        {showDesigner && (
+          <KeycapDesigner
+            designs={keycapDesigns}
+            activeDesignIds={activeKeycapIds}
+            initialSlot={designerSlot}
+            slotCount={keycapCount}
+            onSaveDesign={handleSaveDesign}
+            onSelectDesign={handleSelectDesign}
+            onDeleteDesign={handleDeleteDesign}
+            onClose={() => setShowDesigner(false)}
+            isFever={isFever}
+          />
+        )}
+      </AnimatePresence>
+
       {/* ── Live Feed ───────────────────────────── */}
       <div className="flex-none px-4 pb-4 pt-1" style={{ borderTop: '2px solid #1a1a35' }}>
         <div className="text-[8px] tracking-[2px] uppercase mb-1" style={{ color: '#3a3a5a' }}>LIVE</div>
@@ -598,46 +760,35 @@ export default function App() {
         }
 
         .pixel-keycap-body {
-          width: 152px;
-          height: 152px;
+          position: relative;
           background: #3a3a50;
-          border: 4px solid;
+          border-style: solid;
           border-color: #5a5a70 #222235 #222235 #5a5a70;
-          box-shadow: 0 8px 0 0 #18182a, 0 10px 0 0 #101020;
           transition: box-shadow 0.04s;
         }
 
         .pixel-keycap-btn:active .pixel-keycap-body {
-          box-shadow: 0 2px 0 0 #18182a;
-        }
-
-        .pixel-keycap-body--fever {
-          background: #4a2070;
-          border-color: #7c3aed #2a0845 #2a0845 #7c3aed;
-          box-shadow: 0 8px 0 0 #1a0030, 0 10px 0 0 #100020, 0 0 20px rgba(139,92,246,0.3);
-        }
-
-        .pixel-keycap-btn:active .pixel-keycap-body--fever {
-          box-shadow: 0 2px 0 0 #1a0030, 0 0 10px rgba(139,92,246,0.2);
+          box-shadow: 0 2px 0 0 #18182a !important;
         }
 
         .pixel-keycap-face {
-          width: calc(100% - 14px);
-          height: calc(100% - 14px);
-          margin: 7px;
+          position: absolute;
           background: #4a4a62;
-          border: 3px solid;
+          border-style: solid;
           border-color: #6a6a82 #2e2e42 #2e2e42 #6a6a82;
           display: flex;
           flex-direction: column;
           align-items: center;
           justify-content: center;
           gap: 2px;
+          overflow: hidden;
         }
 
-        .pixel-keycap-face--fever {
-          background: #5b2d8a;
-          border-color: #8b5cf6 #3a1060 #3a1060 #8b5cf6;
+        .pixel-keycap-img {
+          position: absolute;
+          inset: 0;
+          background-size: cover;
+          background-position: center;
         }
       `}</style>
     </div>
