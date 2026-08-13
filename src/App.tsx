@@ -56,8 +56,9 @@ const PLAYER_COLOR = '#00e5ff';
 const UNCLAIMED_BG = '#1e1e3a';
 
 // HP 배율 — 시즌이 7일이므로 점령에 훨씬 많은 클릭이 필요하도록 상향
-// x25: 최소 지역(HP 20) = 500 → 콤보 없이 시작해도 첫 점령까지 ~90탭,
-// 전국 점령 총량 ~40만 HP ≈ 풀콤보 연타로 약 5시간 분량
+// x25: 최소 지역(HP 20) = 500 → 콤보 없이 시작해도 첫 점령까지 ~90탭.
+// 전국 총량 276,000 HP ≈ 무결점 풀콤보 연타 ~2시간, 콤보가 끊기는 현실적
+// 페이스로 ~6시간 + 뺏긴 영토 재점령분이 7일 시즌의 플레이 볼륨.
 const HP_SCALE = 25;
 
 // NPC는 유저가 앱을 보고 있는 동안엔 활동하지 않고, 자리를 비운 사이에만 깨어난다.
@@ -65,6 +66,7 @@ const HP_SCALE = 25;
 const NPC_OFFLINE_DPS = 0.15;                 // 부재 중 전체 NPC 합산 초당 데미지 (유저 연타 ~20dps 대비 훨씬 느림)
 const NPC_MAX_OFFLINE_MS = 8 * 3600 * 1000;   // 한 번의 부재당 최대 8시간까지만 시뮬레이션 (NPC도 잠은 잔다)
 const NPC_MIN_OFFLINE_MS = 60 * 1000;         // 1분 미만의 이탈로는 NPC가 깨어나지 않음
+const NPC_MAX_THEFTS_PER_ABSENCE = 3;         // 부재 1회당 플레이어 영토는 최대 3개까지만 절도 (초보 전멸 방지)
 
 type DData = Omit<District, 'currentHp' | 'owner'>;
 const D = (id: number, name: string, region: string, row: number, col: number, maxHp: number): DData =>
@@ -260,8 +262,8 @@ function simulateNpcOffline(
 
   while (budget > 0) {
     const playerLands = next.filter(d => d.owner === 'player');
-    const stealable = playerLands.length > 1 ? playerLands : [];
-    const pool = stealable.length ? stealable : next.filter(d => !d.owner);
+    const canSteal = playerLands.length > 1 && thefts.length < NPC_MAX_THEFTS_PER_ABSENCE;
+    const pool = canSteal ? playerLands : next.filter(d => !d.owner);
     if (!pool.length) break;
 
     pool.sort((a, b) => a.currentHp - b.currentHp);
@@ -325,7 +327,8 @@ function loadGame() {
   const districts: District[] = DISTRICT_DATA.map((d) => {
     const maxHp = d.maxHp * HP_SCALE;
     if (d.id % 4 === 1 && d.id >= 4) {
-      return { ...d, maxHp, currentHp: maxHp, owner: NPC_NAMES[d.id % NPC_NAMES.length] };
+      // id가 4씩 건너뛰므로 id%8은 2명에게만 몰린다 — floor(id/4)로 8명에게 고르게 배분
+      return { ...d, maxHp, currentHp: maxHp, owner: NPC_NAMES[Math.floor(d.id / 4) % NPC_NAMES.length] };
     }
     return { ...d, maxHp, currentHp: maxHp, owner: null };
   });
@@ -338,16 +341,24 @@ function loadGame() {
 }
 
 // 로드 직후, 마지막 접속 이후 흐른 시간만큼 NPC 활동을 반영해서 게임을 시작한다.
+// 시즌 종료 이후의 시간은 부재로 치지 않는다.
 function initGame() {
   const g = loadGame();
-  const elapsed = Date.now() - g.lastSeenAt;
+
+  // 웹뷰가 백그라운드(프리렌더/세션 복원)로 로드된 경우: 지금 시뮬레이션하면
+  // 유저가 리포트를 못 보고 lastSeenAt만 리셋되므로, 첫 화면 노출 시점으로 미룬다.
+  if (document.visibilityState === 'hidden') {
+    return { ...g, report: null as InvasionReport | null, deferredFrom: g.lastSeenAt as number | null };
+  }
+
+  const elapsed = Math.min(Date.now(), g.seasonEnd) - g.lastSeenAt;
   if (elapsed < NPC_MIN_OFFLINE_MS) {
-    return { ...g, report: null as InvasionReport | null };
+    return { ...g, report: null as InvasionReport | null, deferredFrom: null as number | null };
   }
   const { districts, thefts, otherConquests } = simulateNpcOffline(g.districts, elapsed);
   const report: InvasionReport | null =
     thefts.length > 0 || otherConquests > 0 ? { thefts, otherConquests } : null;
-  return { ...g, districts, report };
+  return { ...g, districts, report, deferredFrom: null as number | null };
 }
 
 function saveGame(
@@ -385,8 +396,10 @@ export default function App() {
   const [init] = useState(initGame);
   const [districts, setDistricts] = useState<District[]>(init.districts);
   const [selectedId, setSelectedId] = useState(() => {
-    const t = init.districts.find(d => !d.owner) ?? init.districts[0];
-    return t.id;
+    // 첫 목표는 가장 싼 미점령지 — 첫 점령 도파민까지의 거리를 최소화
+    const unclaimed = init.districts.filter(d => !d.owner);
+    if (!unclaimed.length) return init.districts[0].id;
+    return unclaimed.reduce((min, d) => (d.maxHp < min.maxHp ? d : min)).id;
   });
   const [combo, setCombo] = useState(0);
   const [totalTaps, setTotalTaps] = useState(init.taps);
@@ -439,9 +452,16 @@ export default function App() {
   }, []);
 
   // ── Auto-save ────────────────────────────────────────
+  // 타이머 id를 ref로 보관: hidden/pagehide flush가 pending 디바운스를
+  // 취소할 수 있어야 부재 중 뒤늦게 발화해 lastSeenAt을 오염시키지 않는다.
+  const autosaveTimer = useRef(0);
   useEffect(() => {
-    const t = setTimeout(() => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds), 500);
-    return () => clearTimeout(t);
+    clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = window.setTimeout(
+      () => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds),
+      500,
+    );
+    return () => clearTimeout(autosaveTimer.current);
   }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds]);
 
   // ── Save keycap designs ──────────────────────────────
@@ -456,22 +476,27 @@ export default function App() {
   const districtsRef = useRef(districts);
   useEffect(() => { districtsRef.current = districts; }, [districts]);
 
+  // districts는 state가 아니라 ref에서 읽는다: applyOffline이 시뮬레이션 결과를
+  // districtsRef에 동기 반영하므로, 직후 flush가 와도 최신 상태가 저장된다.
   const saveNowRef = useRef(() => {});
   useEffect(() => {
     saveNowRef.current = () =>
-      saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds);
-  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds]);
+      saveGame(districtsRef.current, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds);
+  }, [totalTaps, bestCombo, keycapCount, activeKeycapIds]);
 
-  const hiddenAtRef = useRef<number | null>(null);
+  // hidden 상태로 로드된 경우(프리렌더) 저장된 lastSeenAt에서 부재가 이어지는 중
+  const hiddenAtRef = useRef<number | null>(init.deferredFrom);
   useEffect(() => {
     const applyOffline = () => {
       if (hiddenAtRef.current === null) return;
-      const elapsed = Date.now() - hiddenAtRef.current;
+      // 시즌 종료 이후의 시간은 부재로 치지 않는다
+      const elapsed = Math.min(Date.now(), seasonEnd.current) - hiddenAtRef.current;
       hiddenAtRef.current = null;
       if (elapsed < NPC_MIN_OFFLINE_MS) return;
       const { districts: after, thefts, otherConquests } =
         simulateNpcOffline(districtsRef.current, elapsed);
-      if (!thefts.length && !otherConquests) return;
+      // 점령 미달의 부분 데미지도 항상 반영 — 콜드 스타트(initGame)와 동일 규칙
+      districtsRef.current = after;
       setDistricts(after);
       if (thefts.length) {
         setFeed(f => [
@@ -482,27 +507,43 @@ export default function App() {
           })),
           ...f,
         ].slice(0, 30));
-        setInvasionReport({ thefts, otherConquests });
         sound.current.npcAlert();
       }
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') {
-        hiddenAtRef.current = Date.now();
-        saveNowRef.current();
-      } else {
-        applyOffline();
+      if (thefts.length || otherConquests > 0) {
+        setInvasionReport({ thefts, otherConquests });
       }
-    };
-    const onPageHide = () => {
-      hiddenAtRef.current = Date.now();
       saveNowRef.current();
     };
+    const markHidden = () => {
+      // 항상 덮어쓴다: stale하게 남은 과거 시각이 활성 플레이 시간을
+      // 부재로 과대 계산하는 것보다 부재 1회 유실이 낫다.
+      hiddenAtRef.current = Date.now();
+      clearTimeout(autosaveTimer.current);
+      saveNowRef.current();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') markHidden();
+      else applyOffline();
+    };
+    const onPageShow = (e: PageTransitionEvent) => {
+      // iOS bfcache 복원 시 visibilitychange(visible)가 안 오는 경우 대비
+      if (e.persisted) applyOffline();
+    };
     document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pagehide', markHidden);
+    window.addEventListener('pageshow', onPageShow);
+
+    // 하트비트: 크래시/강제종료로 hidden 이벤트를 못 받아도, 화면을 보고 있던
+    // 시간이 NPC 부재로 계산되지 않도록 lastSeenAt을 30초마다 갱신한다.
+    const heartbeat = window.setInterval(() => {
+      if (document.visibilityState === 'visible') saveNowRef.current();
+    }, 30000);
+
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pagehide', markHidden);
+      window.removeEventListener('pageshow', onPageShow);
+      clearInterval(heartbeat);
     };
   }, []);
 
@@ -522,60 +563,65 @@ export default function App() {
   }, []);
 
   // ── Tap Handler ──────────────────────────────────────
-  const handleTap = useCallback((e: React.MouseEvent | React.TouchEvent, keycapIdx: number) => {
+  const handleTap = useCallback((e: React.PointerEvent, keycapIdx: number) => {
+    if (e.button !== 0) return;
     e.preventDefault();
 
-    setDistricts(prev => {
-      const target = prev.find(d => d.id === selectedId);
-      if (!target || target.owner === 'player') return prev;
+    // updater 안에서 부수효과를 실행하면 StrictMode/concurrent 재실행 시
+    // 콤보·사운드가 중복된다. districtsRef를 진실의 원천으로 삼아 모든 로직을
+    // 핸들러 본문(1회 실행 보장)에서 처리하고, setDistricts에는 결과만 넘긴다.
+    const target = districtsRef.current.find(d => d.id === selectedId);
+    if (!target || target.owner === 'player') return;
 
-      comboRef.current += 1;
-      const c = comboRef.current;
-      const dmg = comboMultiplier(c);
-      setCombo(c);
-      if (c > bestCombo) setBestCombo(c);
-      setTotalTaps(t => t + 1);
+    comboRef.current += 1;
+    const c = comboRef.current;
+    const dmg = comboMultiplier(c);
+    setCombo(c);
+    if (c > bestCombo) setBestCombo(c);
+    setTotalTaps(t => t + 1);
 
-      clearTimeout(comboTimer.current);
-      comboTimer.current = window.setTimeout(() => { comboRef.current = 0; setCombo(0); }, 1500);
+    clearTimeout(comboTimer.current);
+    comboTimer.current = window.setTimeout(() => { comboRef.current = 0; setCombo(0); }, 1500);
 
-      if ([5, 15, 30, 50].includes(c)) sound.current.combo(Math.ceil(c / 15));
-      sound.current.tap();
-      if (navigator.vibrate) navigator.vibrate(12);
+    if ([5, 15, 30, 50].includes(c)) sound.current.combo(Math.ceil(c / 15));
+    sound.current.tap();
+    if (navigator.vibrate) navigator.vibrate(12);
 
-      const el = keycapRefs.current[keycapIdx];
-      if (el) {
-        const rect = el.getBoundingClientRect();
-        const pid = ++particleId.current;
-        setParticles(p => [...p, {
-          id: pid,
-          x: rect.left + rect.width * (0.3 + Math.random() * 0.4),
-          y: rect.top + rect.height * 0.15,
-          value: `+${dmg}`,
-        }]);
-        setTimeout(() => setParticles(p => p.filter(pp => pp.id !== pid)), 700);
-      }
+    const el = keycapRefs.current[keycapIdx];
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      const pid = ++particleId.current;
+      setParticles(p => [...p, {
+        id: pid,
+        x: rect.left + rect.width * (0.3 + Math.random() * 0.4),
+        y: rect.top + rect.height * 0.15,
+        value: `+${dmg}`,
+      }]);
+      setTimeout(() => setParticles(p => p.filter(pp => pp.id !== pid)), 700);
+    }
 
-      setFlashId(target.id);
-      setTimeout(() => setFlashId(null), 80);
+    setFlashId(target.id);
+    setTimeout(() => setFlashId(null), 80);
 
-      const hp = Math.max(0, target.currentHp - dmg);
-      const won = hp <= 0;
+    const hp = Math.max(0, target.currentHp - dmg);
+    const won = hp <= 0;
 
-      if (won) {
-        sound.current.conquest();
-        if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
-        setConquestName(districtLabel(target));
-        setTimeout(() => setConquestName(null), 1500);
-        addFeed(`🏴 [${districtLabel(target)}] 점령 완료!`, 'player');
-        const updated = prev.map(d => d.id === target.id ? { ...d, currentHp: d.maxHp, owner: 'player' } : d);
-        const nxt = nextTarget(target, updated);
-        setTimeout(() => setSelectedId(nxt), 200);
-        return updated;
-      }
+    const updated = districtsRef.current.map(d =>
+      d.id === target.id
+        ? (won ? { ...d, currentHp: d.maxHp, owner: 'player' } : { ...d, currentHp: hp })
+        : d);
+    districtsRef.current = updated;
+    setDistricts(updated);
 
-      return prev.map(d => d.id === target.id ? { ...d, currentHp: hp } : d);
-    });
+    if (won) {
+      sound.current.conquest();
+      if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+      setConquestName(districtLabel(target));
+      setTimeout(() => setConquestName(null), 1500);
+      addFeed(`🏴 [${districtLabel(target)}] 점령 완료!`, 'player');
+      const nxt = nextTarget(target, updated);
+      setTimeout(() => setSelectedId(nxt), 200);
+    }
   }, [selectedId, bestCombo, addFeed, nextTarget]);
 
   // ── Keycap Design Handlers ───────────────────────────
@@ -722,10 +768,14 @@ export default function App() {
                 )}
               </div>
               <span className="text-[10px] font-bold" style={{ color: isOwned ? '#4ade80' : '#ccccee' }}>
-                {isOwned ? '방어중' : `${selected.currentHp}/${selected.maxHp}`}
+                {isOwned
+                  ? (selected.currentHp < selected.maxHp
+                    ? `방어중 ${selected.currentHp}/${selected.maxHp}`
+                    : '방어중')
+                  : `${selected.currentHp}/${selected.maxHp}`}
               </span>
             </div>
-            {!isOwned && (
+            {(!isOwned || selected.currentHp < selected.maxHp) && (
               <div style={{ height: 8, background: '#111128', border: '2px solid #2a2a45' }}>
                 <motion.div
                   style={{
@@ -816,8 +866,7 @@ export default function App() {
                 key={i}
                 ref={(el) => { keycapRefs.current[i] = el; }}
                 id={i === 0 ? 'tap-button' : undefined}
-                onMouseDown={(e) => handleTap(e, i)}
-                onTouchStart={(e) => handleTap(e, i)}
+                onPointerDown={(e) => handleTap(e, i)}
                 className="pixel-keycap-btn"
                 style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', border: 'none', cursor: 'pointer' }}
                 whileTap={{ y: sz.press, transition: { type: 'spring', stiffness: 800, damping: 20 } }}
