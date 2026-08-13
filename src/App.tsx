@@ -12,6 +12,8 @@ import { PowerUpIndicator } from './components/PowerUpIndicator';
 import { StatsPanel } from './components/StatsPanel';
 import { SettingsPanel, type GameSettings } from './components/SettingsPanel';
 import { Onboarding } from './components/Onboarding';
+import { KeycapButton } from './components/KeycapButton';
+import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
 import { neighborhoods as initialNeighborhoods } from './data/neighborhoods';
 import { calculateLevel } from './data/levels';
 import { ACHIEVEMENTS, type AchievementStats } from './data/achievements';
@@ -102,6 +104,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('map');
   const [selectedNeighborhood, setSelectedNeighborhood] = useState(MY_NEIGHBORHOOD_ID);
   const [showOnboarding, setShowOnboarding] = useState(!saved.hasOnboarded);
+  const [keycapDesigns, setKeycapDesigns] = useLocalStorage<KeycapDesign[]>('tapwar_keycap_designs', []);
+  const [activeKeycapId, setActiveKeycapId] = useLocalStorage<string | null>('tapwar_active_keycap', null);
+  const [showDesigner, setShowDesigner] = useState(false);
 
   const comboTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevLevelRef = useRef(calculateLevel(saved.totalXp).level);
@@ -373,6 +378,20 @@ export default function App() {
 
   const selectedInfo = neighborhoodData.find((n) => n.id === selectedNeighborhood);
 
+  const activeKeycapImage = useMemo(() => {
+    if (!activeKeycapId) return null;
+    return keycapDesigns.find((d) => d.id === activeKeycapId)?.imageData ?? null;
+  }, [activeKeycapId, keycapDesigns]);
+
+  const handleSaveDesign = useCallback((design: KeycapDesign) => {
+    setKeycapDesigns((prev) => [...prev, design]);
+  }, [setKeycapDesigns]);
+
+  const handleDeleteDesign = useCallback((id: string) => {
+    setKeycapDesigns((prev) => prev.filter((d) => d.id !== id));
+    setActiveKeycapId((prev) => (prev === id ? null : prev));
+  }, [setKeycapDesigns, setActiveKeycapId]);
+
   // --- Onboarding ---
   if (showOnboarding) {
     return (
@@ -565,35 +584,15 @@ export default function App() {
             </div>
           )}
 
-          <motion.button
-            id="tap-button"
-            onMouseDown={handleTapCore}
-            onTouchStart={handleTapCore}
-            className={`w-full py-4 rounded-2xl flex items-center justify-center select-none outline-none border-none cursor-pointer ${
-              isFever
-                ? 'bg-gradient-to-r from-yellow-400 via-red-500 to-purple-600'
-                : 'bg-gradient-to-r from-blue-500 to-blue-600'
-            }`}
-            style={{ WebkitTapHighlightColor: 'transparent' }}
-            animate={
-              isFever
-                ? {
-                    scale: [1, 1.02, 1],
-                    boxShadow: [
-                      '0 0 20px rgba(239,68,68,0.3)',
-                      '0 0 40px rgba(239,68,68,0.6)',
-                      '0 0 20px rgba(239,68,68,0.3)',
-                    ],
-                  }
-                : { scale: 1, boxShadow: '0 8px 25px rgba(37,99,235,0.3)' }
-            }
-            transition={isFever ? { repeat: Infinity, duration: 0.6 } : { duration: 0.2 }}
-            whileTap={{ scale: 0.96 }}
-          >
-            <span className="text-white text-center pointer-events-none font-black text-xl">
-              {isFever ? '🔥 FEVER x3 🔥' : '👊 TAP TO CONQUER'}
-            </span>
-          </motion.button>
+          <div className="flex justify-center">
+            <KeycapButton
+              imageUrl={activeKeycapImage}
+              isFever={isFever}
+              label={isFever ? 'FEVER x3' : 'TAP'}
+              onTap={handleTapCore}
+              onCustomize={() => setShowDesigner(true)}
+            />
+          </div>
         </div>
       </div>
 
@@ -614,6 +613,20 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      <AnimatePresence>
+        {showDesigner && (
+          <KeycapDesigner
+            designs={keycapDesigns}
+            activeDesignId={activeKeycapId}
+            onSaveDesign={handleSaveDesign}
+            onSelectDesign={setActiveKeycapId}
+            onDeleteDesign={handleDeleteDesign}
+            onClose={() => setShowDesigner(false)}
+            isFever={isFever}
+          />
+        )}
+      </AnimatePresence>
 
       <style>{`
         .neighborhood-label {
