@@ -1,677 +1,645 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { TapParticle } from './components/TapParticle';
-import { RankingBoard } from './components/RankingBoard';
-import { ConquestToast } from './components/ConquestToast';
-import { FeverOverlay } from './components/FeverOverlay';
-import { NeighborhoodMap } from './components/NeighborhoodMap';
-import { LevelBadge } from './components/LevelBadge';
-import { AchievementToastContainer } from './components/AchievementToast';
-import { DailyMissions } from './components/DailyMissions';
-import { PowerUpIndicator } from './components/PowerUpIndicator';
-import { StatsPanel } from './components/StatsPanel';
-import { SettingsPanel, type GameSettings } from './components/SettingsPanel';
-import { Onboarding } from './components/Onboarding';
-import { KeycapButton, KeycapStyles } from './components/KeycapButton';
-import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
-import { neighborhoods as initialNeighborhoods } from './data/neighborhoods';
-import { calculateLevel } from './data/levels';
-import { ACHIEVEMENTS, type AchievementStats } from './data/achievements';
-import { generateDailyMissions, getDaySeed, type DailyMission } from './data/missions';
-import { useTapSync } from './hooks/useTapSync';
-import { useLocalStorage } from './hooks/useLocalStorage';
-import { useSound } from './hooks/useSound';
-import { usePowerUp } from './hooks/usePowerUp';
+
+// ═══════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════
+
+interface District {
+  id: number;
+  name: string;
+  region: string;
+  row: number;
+  col: number;
+  maxHp: number;
+  currentHp: number;
+  owner: string | null;
+}
 
 interface Particle {
   id: number;
   x: number;
   y: number;
-  value: number;
+  value: string;
 }
 
-interface SavedState {
-  totalXp: number;
-  totalTaps: number;
-  bestCombo: number;
-  feverCount: number;
-  streakDays: number;
-  lastPlayDate: string;
-  unlockedAchievements: string[];
-  missionsCompleted: number;
-  powerUpsUsed: number;
-  hasOnboarded: boolean;
+interface FeedEntry {
+  id: number;
+  text: string;
+  type: 'player' | 'npc' | 'system';
 }
 
-const DEFAULT_STATE: SavedState = {
-  totalXp: 0,
-  totalTaps: 0,
-  bestCombo: 0,
-  feverCount: 0,
-  streakDays: 1,
-  lastPlayDate: '',
-  unlockedAchievements: [],
-  missionsCompleted: 0,
-  powerUpsUsed: 0,
-  hasOnboarded: false,
+// ═══════════════════════════════════════════════════════════
+// Constants & Mock Data
+// ═══════════════════════════════════════════════════════════
+
+const NPC_NAMES = ['김탭러', '박클릭', '이매쉬', '최터치', '정스매시', '한연타', '윤크러시', '강히트'];
+
+const NPC_COLORS: Record<string, string> = {
+  '김탭러': '#ff6b6b', '박클릭': '#feca57', '이매쉬': '#48dbfb', '최터치': '#ff9ff3',
+  '정스매시': '#ffa502', '한연타': '#7bed9f', '윤크러시': '#70a1ff', '강히트': '#ff6348',
 };
 
-type TabId = 'map' | 'missions' | 'stats' | 'settings';
-const TABS: { id: TabId; icon: string; label: string }[] = [
-  { id: 'map', icon: '🗺️', label: '지도' },
-  { id: 'missions', icon: '📋', label: '미션' },
-  { id: 'stats', icon: '📊', label: '통계' },
-  { id: 'settings', icon: '⚙️', label: '설정' },
+const PLAYER_COLOR = '#00e5ff';
+const UNCLAIMED_BG = '#1e1e3a';
+
+type DData = Omit<District, 'currentHp' | 'owner'>;
+const D = (id: number, name: string, region: string, row: number, col: number, maxHp: number): DData =>
+  ({ id, name, region, row, col, maxHp });
+
+const DISTRICT_DATA: DData[] = [
+  D(0,'속초시','강원',0,5,80),    D(1,'양양군','강원',0,6,60),
+  D(2,'의정부','경기',1,3,90),    D(3,'가평군','경기',1,4,50),    D(4,'춘천시','강원',1,5,120),
+  D(5,'강릉시','강원',1,6,100),   D(6,'동해시','강원',1,7,70),
+  D(7,'고양시','경기',2,2,130),   D(8,'종로구','서울',2,3,200),   D(9,'강남구','서울',2,4,250),
+  D(10,'원주시','강원',2,5,100),  D(11,'태백시','강원',2,6,60),
+  D(12,'인천','인천',3,1,180),    D(13,'부천시','경기',3,2,100),   D(14,'마포구','서울',3,3,150),
+  D(15,'수원시','경기',3,4,160),  D(16,'성남시','경기',3,5,140),
+  D(17,'평택시','경기',4,1,100),  D(18,'화성시','경기',4,2,120),   D(19,'안양시','경기',4,3,110),
+  D(20,'용인시','경기',4,4,140),  D(21,'충주시','충북',4,5,90),
+  D(22,'서산시','충남',5,2,80),   D(23,'천안시','충남',5,3,130),   D(24,'세종시','세종',5,4,100),
+  D(25,'청주시','충북',5,5,140),  D(26,'안동시','경북',5,6,90),
+  D(27,'논산시','충남',6,3,70),   D(28,'대전','대전',6,4,200),     D(29,'구미시','경북',6,5,100),
+  D(30,'포항시','경북',6,6,120),  D(31,'영덕군','경북',6,7,50),
+  D(32,'군산시','전북',7,2,100),  D(33,'전주시','전북',7,3,150),   D(34,'남원시','전북',7,4,60),
+  D(35,'김천시','경북',7,5,80),   D(36,'대구','대구',7,6,220),     D(37,'경주시','경북',7,7,130),
+  D(38,'광주','광주',8,2,170),    D(39,'나주시','전남',8,3,70),     D(40,'함양군','경남',8,4,50),
+  D(41,'의령군','경남',8,5,40),   D(42,'울산','울산',8,6,160),     D(43,'부산','부산',8,7,280),
+  D(44,'목포시','전남',9,2,90),   D(45,'순천시','전남',9,3,100),   D(46,'사천시','경남',9,4,60),
+  D(47,'김해시','경남',9,5,120),  D(48,'창원시','경남',9,6,150),
+  D(49,'완도군','전남',10,2,40),  D(50,'여수시','전남',10,3,110),
+  D(51,'통영시','경남',10,5,60),  D(52,'거제시','경남',10,6,80),
+  D(53,'제주시','제주',12,2,140), D(54,'서귀포','제주',12,3,100),
 ];
 
-const MY_NEIGHBORHOOD_ID = 'yeoksam';
+// ═══════════════════════════════════════════════════════════
+// 8-bit Sound Engine
+// ═══════════════════════════════════════════════════════════
 
-const RANK_MESSAGES: Record<number, string> = {
-  0: '🏆 역삼동 1위 탈환!',
-  1: '🥈 역삼동 2위 진입!',
-  2: '🥉 역삼동 3위 달성!',
-};
+function createPixelSound() {
+  let ctx: AudioContext | null = null;
+  const getCtx = () => { if (!ctx) ctx = new AudioContext(); return ctx; };
 
-let particleId = 0;
-
-export default function App() {
-  // --- Persisted state ---
-  const [saved, setSaved] = useLocalStorage<SavedState>('tapwar_state', DEFAULT_STATE);
-  const [settings, setSettings] = useLocalStorage<GameSettings>('tapwar_settings', {
-    sound: true,
-    haptic: true,
-    showMap: true,
-  });
-  const [missionState, setMissionState] = useLocalStorage<{ seed: number; missions: DailyMission[] }>(
-    'tapwar_missions',
-    { seed: 0, missions: [] },
-  );
-
-  // --- Session state ---
-  const [neighborhoodData, setNeighborhoodData] = useState(() =>
-    initialNeighborhoods.map((n) =>
-      n.id === MY_NEIGHBORHOOD_ID ? { ...n, taps: n.taps + saved.totalTaps } : n,
-    ),
-  );
-  const myData = neighborhoodData.find((n) => n.id === MY_NEIGHBORHOOD_ID)!;
-  const sessionTapsRef = useRef(0);
-  const sessionXpRef = useRef(0);
-  const [combo, setCombo] = useState(0);
-  const [isFever, setIsFever] = useState(false);
-  const [particles, setParticles] = useState<Particle[]>([]);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [achievementQueue, setAchievementQueue] = useState<{ icon: string; title: string }[]>([]);
-  const [activeTab, setActiveTab] = useState<TabId>('map');
-  const [selectedNeighborhood, setSelectedNeighborhood] = useState(MY_NEIGHBORHOOD_ID);
-  const [showOnboarding, setShowOnboarding] = useState(!saved.hasOnboarded);
-  const [keycapDesigns, setKeycapDesigns] = useLocalStorage<KeycapDesign[]>('tapwar_keycap_designs', []);
-  const [activeKeycapIds, setActiveKeycapIds] = useLocalStorage<(string | null)[]>('tapwar_active_keycaps', [null, null, null]);
-  const [showDesigner, setShowDesigner] = useState(false);
-  const [designerSlot, setDesignerSlot] = useState(0);
-
-  const comboTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevLevelRef = useRef(calculateLevel(saved.totalXp).level);
-  const lastRankRef = useRef(
-    [...initialNeighborhoods].sort((a, b) => b.taps - a.taps).findIndex((n) => n.id === MY_NEIGHBORHOOD_ID)
-  );
-  const isFeverRef = useRef(false);
-
-  // --- Hooks ---
-  const playSound = useSound(settings.sound);
-
-  const { addTap } = useTapSync({
-    intervalMs: 2000,
-    onSync: async (count) => {
-      console.log(`[useTapSync] batched ${count} taps`);
-    },
-  });
-
-  const tapCoreRef = useRef<(e: React.MouseEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => void>(() => {});
-
-  const handleAutoTap = useCallback(() => {
-    const idx = Math.floor(Math.random() * 3);
-    const btn = document.getElementById(`tap-button-${idx}`);
-    if (btn) {
-      const rect = btn.getBoundingClientRect();
-      const fakeEvent = {
-        preventDefault: () => {},
-        clientX: rect.left + rect.width / 2 + (Math.random() - 0.5) * 30,
-        clientY: rect.top + rect.height / 2 + (Math.random() - 0.5) * 15,
-      } as unknown as React.MouseEvent<HTMLButtonElement>;
-      tapCoreRef.current(fakeEvent);
-    }
-  }, []);
-
-  const powerUp = usePowerUp(handleAutoTap);
-
-  // --- Daily missions init ---
-  const todaySeed = getDaySeed();
-  useEffect(() => {
-    if (missionState.seed !== todaySeed) {
-      setMissionState({ seed: todaySeed, missions: generateDailyMissions(todaySeed) });
-    }
-  }, [todaySeed, missionState.seed, setMissionState]);
-
-  // --- Streak calculation ---
-  useEffect(() => {
-    const today = new Date().toISOString().slice(0, 10);
-    if (saved.lastPlayDate !== today) {
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      const newStreak = saved.lastPlayDate === yesterday ? saved.streakDays + 1 : 1;
-      setSaved((prev) => ({ ...prev, lastPlayDate: today, streakDays: newStreak }));
-    }
-  }, [saved.lastPlayDate, saved.streakDays, setSaved]);
-
-  // --- Achievement checker ---
-  const checkAchievements = useCallback(
-    (stats: AchievementStats) => {
-      const newUnlocks: { icon: string; title: string }[] = [];
-      ACHIEVEMENTS.forEach((a) => {
-        if (!saved.unlockedAchievements.includes(a.id) && a.condition(stats)) {
-          newUnlocks.push({ icon: a.icon, title: a.title });
-          setSaved((prev) => ({
-            ...prev,
-            unlockedAchievements: [...prev.unlockedAchievements, a.id],
-          }));
-        }
-      });
-      if (newUnlocks.length > 0) {
-        setAchievementQueue((prev) => [...prev, ...newUnlocks]);
-        playSound('achievement');
-      }
-    },
-    [saved.unlockedAchievements, setSaved, playSound],
-  );
-
-  // --- Core tap handler ---
-  const handleTapCore = useCallback(
-    (e: React.MouseEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>) => {
-      e.preventDefault();
-
-      let clientX = 0;
-      let clientY = 0;
-      if ('touches' in e && e.touches.length > 0) {
-        clientX = e.touches[0].clientX;
-        clientY = e.touches[0].clientY;
-      } else if ('clientX' in e) {
-        clientX = e.clientX;
-        clientY = e.clientY;
-      }
-
-      const nextCombo = combo + 1;
-      const isNowFever = nextCombo >= 50;
-      const baseTapValue = isNowFever ? 3 : 1;
-      const multiplier = powerUp.getMultiplier();
-      const tapValue = baseTapValue * multiplier;
-      const xpGained = tapValue;
-
-      const feverJustStarted = isNowFever && !isFeverRef.current;
-
-      if (feverJustStarted) {
-        setSaved((prev) => ({ ...prev, feverCount: prev.feverCount + 1 }));
-        playSound('fever');
-      } else if (nextCombo % 10 === 0 && nextCombo > 0) {
-        playSound('combo');
-      } else {
-        playSound('tap');
-      }
-
-      setCombo(nextCombo);
-      setIsFever(isNowFever);
-      isFeverRef.current = isNowFever;
-      sessionTapsRef.current += tapValue;
-      sessionXpRef.current += xpGained;
-
-      setSaved((prev) => {
-        const newState = {
-          ...prev,
-          totalTaps: prev.totalTaps + tapValue,
-          totalXp: prev.totalXp + xpGained,
-          bestCombo: Math.max(prev.bestCombo, nextCombo),
-        };
-        const newLevel = calculateLevel(newState.totalXp).level;
-        if (newLevel > prevLevelRef.current) {
-          prevLevelRef.current = newLevel;
-          playSound('levelUp');
-        }
-        return newState;
-      });
-
-      setNeighborhoodData((prev) => {
-        const updated = prev.map((n) =>
-          n.id === MY_NEIGHBORHOOD_ID ? { ...n, taps: n.taps + tapValue } : n,
-        );
-        const sorted = [...updated].sort((a, b) => b.taps - a.taps);
-        const myNewRank = sorted.findIndex((n) => n.id === MY_NEIGHBORHOOD_ID);
-        if (myNewRank < lastRankRef.current && myNewRank <= 2) {
-          setToastMessage(RANK_MESSAGES[myNewRank] ?? `역삼동 ${myNewRank + 1}위!`);
-          lastRankRef.current = myNewRank;
-        }
-        return updated;
-      });
-
-      setMissionState((prev) => ({
-        ...prev,
-        missions: prev.missions.map((m) => {
-          if (m.claimed) return m;
-          let newProgress = m.progress;
-          if (m.statKey === 'sessionTaps') newProgress += tapValue;
-          if (m.statKey === 'sessionBestCombo') newProgress = Math.max(newProgress, nextCombo);
-          if (m.statKey === 'sessionFeverCount' && feverJustStarted) newProgress += 1;
-          if (m.statKey === 'sessionXp') newProgress += xpGained;
-          const completed = newProgress >= m.target;
-          if (completed && !m.completed) playSound('missionComplete');
-          return { ...m, progress: newProgress, completed };
-        }),
-      }));
-
-      addTap(tapValue);
-      powerUp.recordTap();
-
-      if ((window as any).__mapTriggerRipple) {
-        (window as any).__mapTriggerRipple();
-      }
-
-      const id = ++particleId;
-      const displayValue = tapValue;
-      setParticles((prev) => [...prev, { id, x: clientX - 15, y: clientY - 30, value: displayValue }]);
-      setTimeout(() => {
-        setParticles((prev) => prev.filter((p) => p.id !== id));
-      }, 750);
-
-      if (settings.haptic && navigator.vibrate) {
-        navigator.vibrate(isNowFever ? [20, 10, 20] : 15);
-      }
-
-      if (!powerUp.isComboFrozen()) {
-        if (comboTimeoutRef.current) clearTimeout(comboTimeoutRef.current);
-        comboTimeoutRef.current = setTimeout(() => {
-          setCombo(0);
-          setIsFever(false);
-          isFeverRef.current = false;
-        }, 1000);
-      }
-    },
-    [combo, addTap, powerUp, settings.haptic, playSound, setSaved, setMissionState],
-  );
-
-  tapCoreRef.current = handleTapCore;
-
-  // --- Check achievements periodically ---
-  useEffect(() => {
-    const levelInfo = calculateLevel(saved.totalXp);
-    const stats: AchievementStats = {
-      totalTaps: saved.totalTaps,
-      bestCombo: saved.bestCombo,
-      feverCount: saved.feverCount,
-      totalPlaySessions: 1,
-      streakDays: saved.streakDays,
-      level: levelInfo.level,
-      powerUpsUsed: saved.powerUpsUsed,
-      missionsCompleted: saved.missionsCompleted,
-    };
-    checkAchievements(stats);
-  }, [saved.totalTaps, saved.bestCombo, saved.feverCount, saved.streakDays, saved.totalXp, saved.powerUpsUsed, saved.missionsCompleted, checkAchievements]);
-
-  useEffect(() => {
-    return () => {
-      if (comboTimeoutRef.current) clearTimeout(comboTimeoutRef.current);
-    };
-  }, []);
-
-  // --- Mission claim ---
-  const handleClaimMission = useCallback(
-    (index: number) => {
-      const mission = missionState.missions[index];
-      if (!mission || !mission.completed || mission.claimed) return;
-
-      setSaved((prev) => ({
-        ...prev,
-        totalXp: prev.totalXp + mission.xpReward,
-        missionsCompleted: prev.missionsCompleted + 1,
-      }));
-      setMissionState((prev) => ({
-        ...prev,
-        missions: prev.missions.map((m, i) => (i === index ? { ...m, claimed: true } : m)),
-      }));
-      playSound('achievement');
-    },
-    [missionState.missions, setSaved, setMissionState, playSound],
-  );
-
-  // --- Power-up collect ---
-  const handleCollectPowerUp = useCallback(() => {
-    const pu = powerUp.collectDrop();
-    if (pu) {
-      setSaved((prev) => ({ ...prev, powerUpsUsed: prev.powerUpsUsed + 1 }));
-      playSound('powerUp');
-    }
-  }, [powerUp, setSaved, playSound]);
-
-  // --- Reset ---
-  const handleReset = useCallback(() => {
-    setSaved(DEFAULT_STATE);
-    setMissionState({ seed: todaySeed, missions: generateDailyMissions(todaySeed) });
-    sessionTapsRef.current = 0;
-    sessionXpRef.current = 0;
-    setCombo(0);
-    setIsFever(false);
-    isFeverRef.current = false;
-    setNeighborhoodData(initialNeighborhoods);
-    prevLevelRef.current = 1;
-    const sorted = [...initialNeighborhoods].sort((a, b) => b.taps - a.taps);
-    lastRankRef.current = sorted.findIndex((n) => n.id === MY_NEIGHBORHOOD_ID);
-  }, [setSaved, setMissionState, todaySeed]);
-
-  // --- Derived ---
-  const levelInfo = useMemo(() => calculateLevel(saved.totalXp), [saved.totalXp]);
-  const comboProgress = Math.min(combo / 50, 1);
-
-  const rankings = useMemo(() => {
-    return [...neighborhoodData]
-      .sort((a, b) => b.taps - a.taps)
-      .slice(0, 3)
-      .map((n) => ({
-        name: n.name,
-        taps: n.taps,
-        isMe: n.id === MY_NEIGHBORHOOD_ID,
-      }));
-  }, [neighborhoodData]);
-
-  const selectedInfo = neighborhoodData.find((n) => n.id === selectedNeighborhood);
-
-  const keycapImages = useMemo(() => {
-    return activeKeycapIds.map((id) => {
-      if (!id) return null;
-      return keycapDesigns.find((d) => d.id === id)?.imageData ?? null;
-    });
-  }, [activeKeycapIds, keycapDesigns]);
-
-  const handleSaveDesign = useCallback((design: KeycapDesign) => {
-    setKeycapDesigns((prev) => [...prev, design]);
-  }, [setKeycapDesigns]);
-
-  const handleSelectSlotDesign = useCallback((slotIndex: number, id: string | null) => {
-    setActiveKeycapIds((prev) => {
-      const next = [...prev];
-      next[slotIndex] = id;
-      return next;
-    });
-  }, [setActiveKeycapIds]);
-
-  const handleDeleteDesign = useCallback((id: string) => {
-    setKeycapDesigns((prev) => prev.filter((d) => d.id !== id));
-    setActiveKeycapIds((prev) => prev.map((v) => (v === id ? null : v)));
-  }, [setKeycapDesigns, setActiveKeycapIds]);
-
-  // --- Onboarding ---
-  if (showOnboarding) {
-    return (
-      <AnimatePresence>
-        <Onboarding
-          onComplete={() => {
-            setShowOnboarding(false);
-            setSaved((prev) => ({ ...prev, hasOnboarded: true }));
-          }}
-        />
-      </AnimatePresence>
-    );
+  function beep(freq: number, dur: number, vol = 0.08, delay = 0) {
+    try {
+      const c = getCtx();
+      const o = c.createOscillator();
+      const g = c.createGain();
+      o.type = 'square';
+      o.frequency.value = freq;
+      g.gain.value = vol;
+      g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + delay + dur);
+      o.connect(g).connect(c.destination);
+      o.start(c.currentTime + delay);
+      o.stop(c.currentTime + delay + dur);
+    } catch { /* audio not available */ }
   }
 
+  return {
+    tap: () => beep(440 + Math.random() * 80, 0.04),
+    combo: (n: number) => { for (let i = 0; i < Math.min(n, 3); i++) beep(523 * (1 + i * 0.25), 0.07, 0.06, i * 0.06); },
+    conquest: () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.1, 0.1, i * 0.1)),
+    npcAlert: () => beep(220, 0.12, 0.04),
+  };
+}
+
+// ═══════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════
+
+function comboMultiplier(combo: number): number {
+  if (combo >= 50) return 8;
+  if (combo >= 30) return 5;
+  if (combo >= 15) return 3;
+  if (combo >= 5) return 2;
+  return 1;
+}
+
+function ownerColor(owner: string | null): string {
+  if (!owner) return UNCLAIMED_BG;
+  if (owner === 'player') return PLAYER_COLOR;
+  return NPC_COLORS[owner] || '#ff6b6b';
+}
+
+function formatTime(ms: number): string {
+  if (ms <= 0) return '00:00:00';
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Local Storage
+// ═══════════════════════════════════════════════════════════
+
+const SAVE_KEY = 'tapwar_pixel_v1';
+
+interface SaveData {
+  districts: { id: number; hp: number; owner: string | null }[];
+  taps: number;
+  bestCombo: number;
+  seasonEnd: number;
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (raw) {
+      const s: SaveData = JSON.parse(raw);
+      const districts: District[] = DISTRICT_DATA.map(d => {
+        const sd = s.districts.find(x => x.id === d.id);
+        return { ...d, currentHp: sd?.hp ?? d.maxHp, owner: sd?.owner ?? null };
+      });
+      return { districts, taps: s.taps, bestCombo: s.bestCombo, seasonEnd: s.seasonEnd };
+    }
+  } catch { /* corrupt save */ }
+
+  const districts: District[] = DISTRICT_DATA.map((d) => {
+    if (d.id % 4 === 1 && d.id >= 4) {
+      return { ...d, currentHp: d.maxHp, owner: NPC_NAMES[d.id % NPC_NAMES.length] };
+    }
+    return { ...d, currentHp: d.maxHp, owner: null };
+  });
+  return { districts, taps: 0, bestCombo: 0, seasonEnd: Date.now() + 7 * 86400000 };
+}
+
+function saveGame(districts: District[], taps: number, bestCombo: number, seasonEnd: number) {
+  try {
+    const data: SaveData = {
+      districts: districts.map(d => ({ id: d.id, hp: d.currentHp, owner: d.owner })),
+      taps, bestCombo, seasonEnd,
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch { /* storage full */ }
+}
+
+// ═══════════════════════════════════════════════════════════
+// App
+// ═══════════════════════════════════════════════════════════
+
+export default function App() {
+  const [init] = useState(loadGame);
+  const [districts, setDistricts] = useState<District[]>(init.districts);
+  const [selectedId, setSelectedId] = useState(() => {
+    const t = init.districts.find(d => !d.owner) ?? init.districts[0];
+    return t.id;
+  });
+  const [combo, setCombo] = useState(0);
+  const [totalTaps, setTotalTaps] = useState(init.taps);
+  const [bestCombo, setBestCombo] = useState(init.bestCombo);
+  const [particles, setParticles] = useState<Particle[]>([]);
+  const [feed, setFeed] = useState<FeedEntry[]>([
+    { id: 1, text: '⚔ 시즌 1 시작! 대한민국을 점령하세요!', type: 'system' },
+  ]);
+  const [conquestName, setConquestName] = useState<string | null>(null);
+  const [timeLeft, setTimeLeft] = useState('');
+  const [flashId, setFlashId] = useState<number | null>(null);
+
+  const comboTimer = useRef(0);
+  const feedId = useRef(10);
+  const particleId = useRef(0);
+  const sound = useRef(createPixelSound());
+  const seasonEnd = useRef(init.seasonEnd);
+  const comboRef = useRef(0);
+  const keycapRef = useRef<HTMLButtonElement>(null);
+
+  const selected = districts.find(d => d.id === selectedId) ?? null;
+  const playerCount = districts.filter(d => d.owner === 'player').length;
+  const mult = comboMultiplier(combo);
+
+  // ── Season Timer ─────────────────────────────────────
+  useEffect(() => {
+    const t = setInterval(() => setTimeLeft(formatTime(seasonEnd.current - Date.now())), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // ── Auto-save ────────────────────────────────────────
+  useEffect(() => {
+    const t = setTimeout(() => saveGame(districts, totalTaps, bestCombo, seasonEnd.current), 500);
+    return () => clearTimeout(t);
+  }, [districts, totalTaps, bestCombo]);
+
+  // ── NPC Simulation ───────────────────────────────────
+  useEffect(() => {
+    let timer: number;
+    function tick() {
+      timer = window.setTimeout(() => {
+        const npc = NPC_NAMES[Math.floor(Math.random() * NPC_NAMES.length)];
+        setDistricts(prev => {
+          const targets = prev.filter(d => d.owner !== npc);
+          if (!targets.length) return prev;
+          const target = targets[Math.floor(Math.random() * targets.length)];
+          const dmg = 15 + Math.floor(Math.random() * 25);
+          const hp = Math.max(0, target.currentHp - dmg);
+          const won = hp <= 0;
+          const id = ++feedId.current;
+          setFeed(f => [
+            { id, text: won ? `💥 ${npc} → [${target.name}] 점령!` : `⚡ ${npc} → [${target.name}] -${dmg}`, type: 'npc' as const },
+            ...f,
+          ].slice(0, 30));
+          if (won && target.owner === 'player') sound.current.npcAlert();
+          return prev.map(d => d.id === target.id
+            ? { ...d, currentHp: won ? d.maxHp : hp, owner: won ? npc : d.owner }
+            : d);
+        });
+        tick();
+      }, 4000 + Math.random() * 6000);
+    }
+    tick();
+    return () => clearTimeout(timer);
+  }, []);
+
+  // ── Helpers ──────────────────────────────────────────
+  const addFeed = useCallback((text: string, type: FeedEntry['type']) => {
+    setFeed(f => [{ id: ++feedId.current, text, type }, ...f].slice(0, 30));
+  }, []);
+
+  const nextTarget = useCallback((current: District, dists: District[]): number => {
+    const avail = dists.filter(d => d.owner !== 'player');
+    if (!avail.length) return current.id;
+    avail.sort((a, b) =>
+      (Math.abs(a.row - current.row) + Math.abs(a.col - current.col)) -
+      (Math.abs(b.row - current.row) + Math.abs(b.col - current.col))
+    );
+    return avail[0].id;
+  }, []);
+
+  // ── Tap Handler ──────────────────────────────────────
+  const handleTap = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+
+    setDistricts(prev => {
+      const target = prev.find(d => d.id === selectedId);
+      if (!target || target.owner === 'player') return prev;
+
+      comboRef.current += 1;
+      const c = comboRef.current;
+      const dmg = comboMultiplier(c);
+      setCombo(c);
+      if (c > bestCombo) setBestCombo(c);
+      setTotalTaps(t => t + 1);
+
+      clearTimeout(comboTimer.current);
+      comboTimer.current = window.setTimeout(() => { comboRef.current = 0; setCombo(0); }, 1500);
+
+      if ([5, 15, 30, 50].includes(c)) sound.current.combo(Math.ceil(c / 15));
+      sound.current.tap();
+      if (navigator.vibrate) navigator.vibrate(12);
+
+      const el = keycapRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const pid = ++particleId.current;
+        setParticles(p => [...p, {
+          id: pid,
+          x: rect.left + rect.width * (0.3 + Math.random() * 0.4),
+          y: rect.top + rect.height * 0.15,
+          value: `+${dmg}`,
+        }]);
+        setTimeout(() => setParticles(p => p.filter(pp => pp.id !== pid)), 700);
+      }
+
+      setFlashId(target.id);
+      setTimeout(() => setFlashId(null), 80);
+
+      const hp = Math.max(0, target.currentHp - dmg);
+      const won = hp <= 0;
+
+      if (won) {
+        sound.current.conquest();
+        if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+        setConquestName(target.name);
+        setTimeout(() => setConquestName(null), 1500);
+        addFeed(`🏴 [${target.name}] 점령 완료!`, 'player');
+        const updated = prev.map(d => d.id === target.id ? { ...d, currentHp: d.maxHp, owner: 'player' } : d);
+        const nxt = nextTarget(target, updated);
+        setTimeout(() => setSelectedId(nxt), 200);
+        return updated;
+      }
+
+      return prev.map(d => d.id === target.id ? { ...d, currentHp: hp } : d);
+    });
+  }, [selectedId, bestCombo, addFeed, nextTarget]);
+
+  // ── Derived ──────────────────────────────────────────
+  const hpPct = selected ? (selected.currentHp / selected.maxHp) * 100 : 0;
+  const isOwned = selected?.owner === 'player';
+
+  // ── Render ───────────────────────────────────────────
   return (
-    <motion.div
-      className="h-screen flex flex-col font-sans overflow-hidden relative"
-      animate={{ backgroundColor: isFever ? '#1e1b4b' : '#f9fafb' }}
-      transition={{ duration: 0.5 }}
-    >
-      <FeverOverlay active={isFever} />
+    <div className="h-screen w-full flex flex-col overflow-hidden" style={{ background: '#0a0a1e', fontFamily: "'Courier New', monospace" }}>
 
-      <AnimatePresence>
-        {particles.map((p) => (
-          <TapParticle key={p.id} x={p.x} y={p.y} value={p.value} isFever={isFever} />
-        ))}
-      </AnimatePresence>
-
-      <ConquestToast message={toastMessage} onDone={() => setToastMessage(null)} />
-      <AchievementToastContainer
-        queue={achievementQueue}
-        onDismiss={() => setAchievementQueue((prev) => prev.slice(1))}
-      />
-
-      {/* Header */}
-      <header className="flex-none px-4 pt-3 pb-1 z-20">
-        <div className="flex items-center justify-between mb-2">
-          <div className="inline-flex items-center px-3 py-1.5 bg-white/80 backdrop-blur-sm rounded-full shadow-sm">
-            <span className="text-base font-extrabold text-blue-600">📍 역삼동</span>
+      {/* ── Header ──────────────────────────────── */}
+      <div className="flex-none px-4 pt-3 pb-2" style={{ borderBottom: '2px solid #1a1a35' }}>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[9px] tracking-[3px] uppercase" style={{ color: '#5a5a8a' }}>시즌 1 · 대한민국</div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs" style={{ color: '#8888bb' }}>마감까지</span>
+              <span className="text-sm font-bold" style={{ color: '#ff6b6b' }}>{timeLeft || '──:──:──'}</span>
+            </div>
           </div>
-
-          <div className="flex items-center gap-2">
-            <PowerUpIndicator
-              active={powerUp.active}
-              remaining={powerUp.remaining}
-              dropReady={powerUp.dropReady}
-              onCollect={handleCollectPowerUp}
-            />
-            <AnimatePresence>
-              {combo > 10 && (
-                <motion.div
-                  className={`px-3 py-1 rounded-full font-black text-sm italic ${
-                    isFever ? 'text-yellow-400 bg-red-600' : 'text-white bg-blue-500'
-                  }`}
-                  initial={{ opacity: 0, scale: 0.5 }}
-                  animate={{ opacity: 1, scale: isFever ? [1, 1.15, 1] : 1 }}
-                  exit={{ opacity: 0, scale: 0.5 }}
-                  transition={isFever ? { scale: { repeat: Infinity, duration: 0.4 } } : { duration: 0.2 }}
-                >
-                  {combo}
-                </motion.div>
-              )}
-            </AnimatePresence>
+          <div className="text-right">
+            <div className="text-[9px] tracking-[2px]" style={{ color: '#5a5a8a' }}>점령</div>
+            <div className="flex items-baseline gap-0.5">
+              <span className="text-xl font-bold" style={{ color: PLAYER_COLOR }}>{playerCount}</span>
+              <span className="text-xs" style={{ color: '#3a3a5a' }}>/{DISTRICT_DATA.length}</span>
+            </div>
           </div>
         </div>
-
-        {/* Level bar */}
-        <LevelBadge
-          level={levelInfo.level}
-          currentXp={levelInfo.currentXp}
-          requiredXp={levelInfo.requiredXp}
-          isFever={isFever}
-        />
-      </header>
-
-      {/* Content area */}
-      <div className="flex-1 min-h-0 px-4 py-2 z-10 overflow-y-auto">
-        {activeTab === 'map' && settings.showMap && (
-          <NeighborhoodMap
-            neighborhoods={neighborhoodData}
-            myNeighborhoodId={MY_NEIGHBORHOOD_ID}
-            isFever={isFever}
-            onSelectNeighborhood={setSelectedNeighborhood}
-            selectedId={selectedNeighborhood}
-          />
-        )}
-        {activeTab === 'map' && !settings.showMap && (
-          <div className="h-full flex items-center justify-center">
-            <RankingBoard rankings={rankings} isFever={isFever} />
-          </div>
-        )}
-        {activeTab === 'missions' && (
-          <DailyMissions
-            missions={missionState.missions}
-            onClaim={handleClaimMission}
-            isFever={isFever}
-          />
-        )}
-        {activeTab === 'stats' && (
-          <StatsPanel
-            stats={{
-              totalTaps: saved.totalTaps,
-              bestCombo: saved.bestCombo,
-              feverCount: saved.feverCount,
-              streakDays: saved.streakDays,
-              level: levelInfo.level,
-              totalXp: saved.totalXp,
-              missionsCompleted: saved.missionsCompleted,
-              powerUpsUsed: saved.powerUpsUsed,
-            }}
-            unlockedAchievements={saved.unlockedAchievements}
-            isFever={isFever}
-          />
-        )}
-        {activeTab === 'settings' && (
-          <SettingsPanel
-            settings={settings}
-            onChange={setSettings}
-            isFever={isFever}
-            onReset={handleReset}
-          />
-        )}
       </div>
 
-      {/* Selected neighborhood info (map tab only) */}
-      {activeTab === 'map' && settings.showMap && selectedInfo && (
-        <div className="flex-none px-4 pb-1 z-20">
-          <motion.div
-            className={`rounded-xl px-4 py-2 flex items-center justify-between backdrop-blur-sm ${
-              isFever ? 'bg-white/10' : 'bg-white/70'
-            } shadow-sm`}
-            layout
-          >
-            <div>
-              <p className={`text-[10px] ${isFever ? 'text-indigo-300' : 'text-gray-400'}`}>
-                {selectedInfo.id === MY_NEIGHBORHOOD_ID ? '내 동네' : '상대 동네'}
-              </p>
-              <p className={`text-base font-black ${
-                selectedInfo.id === MY_NEIGHBORHOOD_ID
-                  ? isFever ? 'text-yellow-300' : 'text-blue-600'
-                  : isFever ? 'text-white' : 'text-gray-800'
-              }`}>
-                {selectedInfo.name}
-              </p>
-            </div>
-            <p className={`text-xl font-black tracking-tight ${isFever ? 'text-white' : 'text-gray-800'}`}>
-              {selectedInfo.taps.toLocaleString()}
-            </p>
-          </motion.div>
-        </div>
-      )}
-
-      {/* Bottom tap panel */}
-      <div className="flex-none px-4 pb-1 z-20">
-        <div className={`rounded-2xl p-3 backdrop-blur-md ${isFever ? 'bg-white/10' : 'bg-white/70'} shadow-xl`}>
-          <div className="flex items-center justify-between mb-2">
-            <div>
-              <p className={`text-[10px] ${isFever ? 'text-indigo-300' : 'text-gray-400'}`}>총 탭</p>
-              <motion.p
-                className={`text-xl font-black tracking-tight ${isFever ? 'text-white' : 'text-gray-800'}`}
-                style={isFever ? { textShadow: '0 0 10px rgba(255,255,255,0.3)' } : undefined}
-                key={myData.taps}
-                initial={{ scale: 1.04 }}
-                animate={{ scale: 1 }}
-                transition={{ duration: 0.06 }}
+      {/* ── Map ─────────────────────────────────── */}
+      <div className="flex-none flex justify-center py-2 overflow-hidden">
+        <div style={{
+          display: 'inline-grid',
+          gridTemplateColumns: 'repeat(7, 24px)',
+          gridTemplateRows: 'repeat(13, 20px)',
+          gap: '3px',
+        }}>
+          {districts.map(d => {
+            const isSel = d.id === selectedId;
+            const color = d.id === flashId ? '#ffffff' : ownerColor(d.owner);
+            return (
+              <motion.div
+                key={d.id}
+                onClick={() => setSelectedId(d.id)}
+                style={{
+                  gridColumn: d.col,
+                  gridRow: d.row + 1,
+                  width: 24, height: 20,
+                  background: color,
+                  border: isSel ? '2px solid #fff' : `2px solid ${d.owner ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.05)'}`,
+                  cursor: 'pointer',
+                  boxShadow: isSel ? `0 0 8px ${PLAYER_COLOR}44` : 'none',
+                  position: 'relative',
+                }}
+                animate={isSel ? { opacity: [1, 0.55, 1] } : { opacity: 1 }}
+                transition={isSel ? { repeat: Infinity, duration: 0.7, ease: 'easeInOut' } : { duration: 0.15 }}
               >
-                {myData.taps.toLocaleString()}
-              </motion.p>
-            </div>
-            <div className="text-right">
-              <p className={`text-[10px] ${isFever ? 'text-indigo-300' : 'text-gray-400'}`}>내 기여</p>
-              <p className={`text-xl font-black ${isFever ? 'text-yellow-300' : 'text-blue-600'}`}>
-                {saved.totalTaps.toLocaleString()}
-              </p>
-            </div>
-          </div>
+                {d.owner === 'player' && (
+                  <div style={{
+                    position: 'absolute', inset: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 8, color: '#0a0a1e', fontWeight: 900,
+                  }}>●</div>
+                )}
+              </motion.div>
+            );
+          })}
+        </div>
+      </div>
 
-          {combo > 0 && combo < 50 && (
-            <div className="mb-2 flex items-center gap-2">
-              <div className={`flex-1 h-1.5 rounded-full overflow-hidden ${isFever ? 'bg-white/20' : 'bg-gray-200'}`}>
-                <motion.div
-                  className="h-full rounded-full bg-gradient-to-r from-blue-400 to-purple-500"
-                  animate={{ width: `${comboProgress * 100}%` }}
-                  transition={{ duration: 0.1 }}
-                />
+      {/* ── Map Legend (mini) ────────────────────── */}
+      <div className="flex-none flex justify-center gap-4 pb-1 px-4">
+        <div className="flex items-center gap-1">
+          <div style={{ width: 8, height: 8, background: PLAYER_COLOR }} />
+          <span className="text-[8px]" style={{ color: '#6a6a9a' }}>나</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div style={{ width: 8, height: 8, background: '#ff6b6b' }} />
+          <span className="text-[8px]" style={{ color: '#6a6a9a' }}>적</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <div style={{ width: 8, height: 8, background: UNCLAIMED_BG, border: '1px solid #333' }} />
+          <span className="text-[8px]" style={{ color: '#6a6a9a' }}>미점령</span>
+        </div>
+      </div>
+
+      {/* ── Selected District HP ────────────────── */}
+      <div className="flex-none px-5 py-1">
+        {selected && (
+          <div>
+            <div className="flex justify-between items-baseline mb-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold" style={{ color: ownerColor(selected.owner) }}>
+                  [{selected.name}]
+                </span>
+                <span className="text-[9px]" style={{ color: '#5a5a8a' }}>{selected.region}</span>
               </div>
-              <span className={`text-[10px] font-bold ${isFever ? 'text-indigo-200' : 'text-gray-400'}`}>
-                {combo}/50
+              <span className="text-[10px] font-bold" style={{ color: isOwned ? '#4ade80' : '#ccccee' }}>
+                {isOwned ? '방어중' : `${selected.currentHp}/${selected.maxHp}`}
               </span>
             </div>
-          )}
+            {!isOwned && (
+              <div style={{ height: 8, background: '#111128', border: '2px solid #2a2a45' }}>
+                <motion.div
+                  style={{
+                    height: '100%',
+                    background: hpPct > 50 ? '#4ade80' : hpPct > 25 ? '#fbbf24' : '#ef4444',
+                  }}
+                  animate={{ width: `${hpPct}%` }}
+                  transition={{ duration: 0.08 }}
+                />
+              </div>
+            )}
+            {selected.owner && selected.owner !== 'player' && (
+              <div className="text-[9px] mt-0.5" style={{ color: ownerColor(selected.owner) }}>
+                점령자: {selected.owner}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
-          <div className="flex justify-center gap-3">
-            {[0, 1, 2].map((i) => (
-              <KeycapButton
-                key={i}
-                buttonId={`tap-button-${i}`}
-                imageUrl={keycapImages[i] ?? null}
-                isFever={isFever}
-                label={isFever ? 'FEVER' : 'TAP'}
-                compact
-                onTap={handleTapCore}
-              />
-            ))}
-          </div>
-          <div className="flex justify-center mt-2">
-            <button
-              onClick={() => { setDesignerSlot(0); setShowDesigner(true); }}
-              className={`text-[11px] font-bold px-3 py-1 rounded-full transition-colors ${
-                isFever ? 'text-indigo-300 bg-white/5 active:bg-white/10' : 'text-gray-400 bg-gray-100 active:bg-gray-200'
-              }`}
+      {/* ── Keycap Area ─────────────────────────── */}
+      <div className="flex-1 flex flex-col items-center justify-center relative min-h-0">
+        {/* Combo display */}
+        <div className="flex-none mb-2 text-center" style={{ minHeight: 28 }}>
+          {combo > 0 && (
+            <motion.div
+              key={combo}
+              initial={{ scale: 1.4, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="flex items-center justify-center gap-2"
             >
-              🎨 키캡 꾸미기
-            </button>
+              <span className="text-lg font-bold" style={{ color: combo >= 30 ? '#ff6b6b' : combo >= 15 ? '#fbbf24' : '#00e5ff' }}>
+                {combo} COMBO
+              </span>
+              <span className="text-sm font-bold" style={{
+                color: '#0a0a1e',
+                background: combo >= 30 ? '#ff6b6b' : combo >= 15 ? '#fbbf24' : '#00e5ff',
+                padding: '1px 6px',
+              }}>
+                ×{mult}
+              </span>
+            </motion.div>
+          )}
+        </div>
+
+        {/* Keycap Button */}
+        <motion.button
+          ref={keycapRef}
+          id="tap-button"
+          onMouseDown={handleTap}
+          onTouchStart={handleTap}
+          className="pixel-keycap-btn"
+          style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', border: 'none', cursor: 'pointer' }}
+          whileTap={{ y: 6, transition: { type: 'spring', stiffness: 800, damping: 20 } }}
+          animate={combo >= 30 ? { boxShadow: ['0 8px 0 #1a0030, 0 0 0 rgba(139,92,246,0)', '0 8px 0 #1a0030, 0 0 30px rgba(139,92,246,0.5)'] } : {}}
+          transition={combo >= 30 ? { repeat: Infinity, duration: 0.6, repeatType: 'reverse' as const } : {}}
+        >
+          <div className={`pixel-keycap-body ${combo >= 30 ? 'pixel-keycap-body--fever' : ''}`}>
+            <div className={`pixel-keycap-face ${combo >= 30 ? 'pixel-keycap-face--fever' : ''}`}>
+              <span style={{ fontSize: 40, lineHeight: 1 }}>{combo >= 30 ? '🔥' : '⚔️'}</span>
+              <span style={{
+                fontSize: 11, fontWeight: 900, letterSpacing: 4,
+                color: combo >= 30 ? '#fbbf24' : '#8888aa',
+              }}>
+                TAP!
+              </span>
+            </div>
           </div>
+        </motion.button>
+
+        {isOwned && (
+          <div className="text-[10px] mt-2" style={{ color: '#5a5a8a' }}>
+            ↑ 다른 지역을 선택하세요
+          </div>
+        )}
+
+        {/* Total taps */}
+        <div className="flex-none mt-2 text-[9px]" style={{ color: '#3a3a5a' }}>
+          총 {totalTaps.toLocaleString()}회 탭 · 최고 콤보 {bestCombo}
         </div>
       </div>
 
-      {/* Bottom navigation */}
-      <nav className={`flex-none flex items-center justify-around px-2 py-2 z-20 ${isFever ? 'bg-indigo-950/80' : 'bg-white/80'} backdrop-blur-sm`}>
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`flex flex-col items-center gap-0.5 px-4 py-1 rounded-xl transition-colors ${
-              activeTab === tab.id
-                ? isFever ? 'text-yellow-400' : 'text-blue-600'
-                : isFever ? 'text-indigo-400' : 'text-gray-400'
-            }`}
-          >
-            <span className="text-lg">{tab.icon}</span>
-            <span className="text-[10px] font-bold">{tab.label}</span>
-          </button>
-        ))}
-      </nav>
+      {/* ── Particles (fixed overlay) ───────────── */}
+      <div className="fixed inset-0 pointer-events-none" style={{ zIndex: 60 }}>
+        <AnimatePresence>
+          {particles.map(p => (
+            <motion.div
+              key={p.id}
+              className="absolute font-bold"
+              style={{ left: p.x, top: p.y, color: PLAYER_COLOR, fontSize: 18, fontFamily: 'monospace', textShadow: '0 0 6px rgba(0,229,255,0.6)' }}
+              initial={{ opacity: 1, y: 0, scale: 1 }}
+              animate={{ opacity: 0, y: -50, scale: 1.3 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.6, ease: 'easeOut' }}
+            >
+              {p.value}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
 
+      {/* ── Conquest Toast ──────────────────────── */}
       <AnimatePresence>
-        {showDesigner && (
-          <KeycapDesigner
-            designs={keycapDesigns}
-            activeDesignIds={activeKeycapIds}
-            initialSlot={designerSlot}
-            onSaveDesign={handleSaveDesign}
-            onSelectDesign={handleSelectSlotDesign}
-            onDeleteDesign={handleDeleteDesign}
-            onClose={() => setShowDesigner(false)}
-            isFever={isFever}
-          />
+        {conquestName && (
+          <motion.div
+            className="fixed inset-0 flex items-center justify-center pointer-events-none"
+            style={{ zIndex: 70 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              initial={{ scale: 0.3, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 1.5, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 15 }}
+              style={{
+                background: '#0a0a1e',
+                border: '4px solid',
+                borderColor: `${PLAYER_COLOR} #005566 #005566 ${PLAYER_COLOR}`,
+                padding: '16px 32px',
+                textAlign: 'center',
+                boxShadow: `0 0 40px ${PLAYER_COLOR}44`,
+              }}
+            >
+              <div style={{ fontSize: 28, marginBottom: 4 }}>⚔️</div>
+              <div style={{ color: PLAYER_COLOR, fontSize: 16, fontWeight: 900, letterSpacing: 2 }}>
+                {conquestName}
+              </div>
+              <div style={{ color: '#fbbf24', fontSize: 11, fontWeight: 700, letterSpacing: 3, marginTop: 4 }}>
+                점 령 완 료
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 
-      <KeycapStyles />
+      {/* ── Live Feed ───────────────────────────── */}
+      <div className="flex-none px-4 pb-4 pt-1" style={{ borderTop: '2px solid #1a1a35' }}>
+        <div className="text-[8px] tracking-[2px] uppercase mb-1" style={{ color: '#3a3a5a' }}>LIVE</div>
+        <div style={{ height: 52, overflow: 'hidden' }}>
+          <AnimatePresence initial={false}>
+            {feed.slice(0, 3).map(entry => (
+              <motion.div
+                key={entry.id}
+                initial={{ height: 0, opacity: 0, x: 20 }}
+                animate={{ height: 17, opacity: 1, x: 0 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.25 }}
+                className="text-[10px] truncate font-bold"
+                style={{
+                  color: entry.type === 'player' ? PLAYER_COLOR
+                    : entry.type === 'npc' ? '#ff9999'
+                    : '#7a7aaa',
+                }}
+              >
+                {entry.text}
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      </div>
 
+      {/* ── Styles ──────────────────────────────── */}
       <style>{`
-        .neighborhood-label {
-          background: transparent !important;
-          border: none !important;
-          box-shadow: none !important;
-          color: inherit;
-          font-weight: 700;
+        * { image-rendering: pixelated; }
+
+        .pixel-keycap-btn {
+          padding: 0;
+          background: transparent;
+          -webkit-tap-highlight-color: transparent;
+          user-select: none;
         }
-        .neighborhood-label::before {
-          display: none !important;
+
+        .pixel-keycap-body {
+          width: 152px;
+          height: 152px;
+          background: #3a3a50;
+          border: 4px solid;
+          border-color: #5a5a70 #222235 #222235 #5a5a70;
+          box-shadow: 0 8px 0 0 #18182a, 0 10px 0 0 #101020;
+          transition: box-shadow 0.04s;
         }
-        .leaflet-container {
-          background: transparent !important;
+
+        .pixel-keycap-btn:active .pixel-keycap-body {
+          box-shadow: 0 2px 0 0 #18182a;
+        }
+
+        .pixel-keycap-body--fever {
+          background: #4a2070;
+          border-color: #7c3aed #2a0845 #2a0845 #7c3aed;
+          box-shadow: 0 8px 0 0 #1a0030, 0 10px 0 0 #100020, 0 0 20px rgba(139,92,246,0.3);
+        }
+
+        .pixel-keycap-btn:active .pixel-keycap-body--fever {
+          box-shadow: 0 2px 0 0 #1a0030, 0 0 10px rgba(139,92,246,0.2);
+        }
+
+        .pixel-keycap-face {
+          width: calc(100% - 14px);
+          height: calc(100% - 14px);
+          margin: 7px;
+          background: #4a4a62;
+          border: 3px solid;
+          border-color: #6a6a82 #2e2e42 #2e2e42 #6a6a82;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 2px;
+        }
+
+        .pixel-keycap-face--fever {
+          background: #5b2d8a;
+          border-color: #8b5cf6 #3a1060 #3a1060 #8b5cf6;
         }
       `}</style>
-    </motion.div>
+    </div>
   );
 }
