@@ -56,7 +56,9 @@ const PLAYER_COLOR = '#00e5ff';
 const UNCLAIMED_BG = '#1e1e3a';
 
 // HP 배율 — 시즌이 7일이므로 점령에 훨씬 많은 클릭이 필요하도록 상향
-const HP_SCALE = 10;
+// x25: 최소 지역(HP 20) = 500 → 콤보 없이 시작해도 첫 점령까지 ~90탭,
+// 전국 점령 총량 ~40만 HP ≈ 풀콤보 연타로 약 5시간 분량
+const HP_SCALE = 25;
 
 // NPC는 유저가 앱을 보고 있는 동안엔 활동하지 않고, 자리를 비운 사이에만 깨어난다.
 // 모든 유저에게 동일하게 적용되는 고정 상수 (랜덤 요소 없음 = 공평).
@@ -288,7 +290,7 @@ function simulateNpcOffline(
 // Local Storage
 // ═══════════════════════════════════════════════════════════
 
-const SAVE_KEY = 'tapwar_pixel_v3';
+const SAVE_KEY = 'tapwar_pixel_v4';
 const KEYCAP_DESIGNS_KEY = 'tapwar_keycap_designs_v1';
 
 interface SaveData {
