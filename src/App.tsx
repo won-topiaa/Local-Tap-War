@@ -164,6 +164,17 @@ const DISTRICT_DATA: DData[] = [
   D(229,'독도','경북',3,22,20),
 ];
 
+// 이름이 겹치는 지역(중구·동구·서구·남구·북구·강서구·고성군 등)은
+// 표시할 때 시/도를 앞에 붙여 구분한다. 예: '서울 중구' vs '부산 중구'
+const DUP_NAMES = (() => {
+  const counts: Record<string, number> = {};
+  for (const d of DISTRICT_DATA) counts[d.name] = (counts[d.name] || 0) + 1;
+  return new Set(Object.keys(counts).filter(n => counts[n] > 1));
+})();
+
+const districtLabel = (d: { name: string; region: string }): string =>
+  DUP_NAMES.has(d.name) ? `${d.region} ${d.name}` : d.name;
+
 const KEYCAP_SIZE = {
   1: { body: 152, margin: 7, border: 4, borderInner: 3, emoji: 40, text: 11, spacing: 4, press: 6, shadow: 8 },
   2: { body: 120, margin: 6, border: 3, borderInner: 2, emoji: 32, text: 9, spacing: 3, press: 5, shadow: 6 },
@@ -261,7 +272,7 @@ function simulateNpcOffline(
       const npc = NPC_NAMES[npcIdx % NPC_NAMES.length];
       npcIdx++;
       if (target.owner === 'player') {
-        thefts.push({ npc, districtId: target.id, districtName: target.name });
+        thefts.push({ npc, districtId: target.id, districtName: districtLabel(target) });
       } else {
         otherConquests++;
       }
@@ -552,9 +563,9 @@ export default function App() {
       if (won) {
         sound.current.conquest();
         if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
-        setConquestName(target.name);
+        setConquestName(districtLabel(target));
         setTimeout(() => setConquestName(null), 1500);
-        addFeed(`🏴 [${target.name}] 점령 완료!`, 'player');
+        addFeed(`🏴 [${districtLabel(target)}] 점령 완료!`, 'player');
         const updated = prev.map(d => d.id === target.id ? { ...d, currentHp: d.maxHp, owner: 'player' } : d);
         const nxt = nextTarget(target, updated);
         setTimeout(() => setSelectedId(nxt), 200);
@@ -702,9 +713,11 @@ export default function App() {
             <div className="flex justify-between items-baseline mb-1">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold" style={{ color: ownerColor(selected.owner) }}>
-                  [{selected.name}]
+                  [{districtLabel(selected)}]
                 </span>
-                <span className="text-[9px]" style={{ color: '#5a5a8a' }}>{selected.region}</span>
+                {!DUP_NAMES.has(selected.name) && (
+                  <span className="text-[9px]" style={{ color: '#5a5a8a' }}>{selected.region}</span>
+                )}
               </div>
               <span className="text-[10px] font-bold" style={{ color: isOwned ? '#4ade80' : '#ccccee' }}>
                 {isOwned ? '방어중' : `${selected.currentHp}/${selected.maxHp}`}
