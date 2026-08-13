@@ -71,6 +71,7 @@ const DISTRICT_DATA: DData[] = [
   D(49,'완도군','전남',10,2,40),  D(50,'여수시','전남',10,3,110),
   D(51,'통영시','경남',10,5,60),  D(52,'거제시','경남',10,6,80),
   D(53,'제주시','제주',12,2,140), D(54,'서귀포','제주',12,3,100),
+  D(55,'울릉도','경북',1,9,70),  D(56,'독도','경북',2,10,30),
 ];
 
 const KEYCAP_SIZE = {
@@ -236,6 +237,7 @@ export default function App() {
   const [activeKeycapIds, setActiveKeycapIds] = useState<(string | null)[]>(init.activeKeycapIds);
   const [showDesigner, setShowDesigner] = useState(false);
   const [designerSlot, setDesignerSlot] = useState(0);
+  const [showRanking, setShowRanking] = useState(false);
 
   const comboTimer = useRef(0);
   const feedId = useRef(10);
@@ -398,6 +400,18 @@ export default function App() {
   const hpPct = selected ? (selected.currentHp / selected.maxHp) * 100 : 0;
   const isOwned = selected?.owner === 'player';
 
+  const ranking = (() => {
+    const counts: Record<string, number> = {};
+    for (const d of districts) {
+      if (d.owner) {
+        counts[d.owner] = (counts[d.owner] || 0) + 1;
+      }
+    }
+    return Object.entries(counts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  })();
+
   // ── Render ───────────────────────────────────────────
   return (
     <div className="h-screen w-full flex flex-col overflow-hidden" style={{ background: '#0a0a1e', fontFamily: "'Courier New', monospace" }}>
@@ -412,11 +426,26 @@ export default function App() {
               <span className="text-sm font-bold" style={{ color: '#ff6b6b' }}>{timeLeft || '──:──:──'}</span>
             </div>
           </div>
-          <div className="text-right">
-            <div className="text-[9px] tracking-[2px]" style={{ color: '#5a5a8a' }}>점령</div>
-            <div className="flex items-baseline gap-0.5">
-              <span className="text-xl font-bold" style={{ color: PLAYER_COLOR }}>{playerCount}</span>
-              <span className="text-xs" style={{ color: '#3a3a5a' }}>/{DISTRICT_DATA.length}</span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowRanking(true)}
+              style={{
+                background: '#1a1a35',
+                border: '2px solid #2a2a45',
+                padding: '4px 8px',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: 4,
+              }}
+            >
+              <span style={{ fontSize: 12 }}>🏆</span>
+              <span style={{ fontSize: 9, fontWeight: 900, color: '#fbbf24', letterSpacing: 1 }}>RANK</span>
+            </button>
+            <div className="text-right">
+              <div className="text-[9px] tracking-[2px]" style={{ color: '#5a5a8a' }}>점령</div>
+              <div className="flex items-baseline gap-0.5">
+                <span className="text-xl font-bold" style={{ color: PLAYER_COLOR }}>{playerCount}</span>
+                <span className="text-xs" style={{ color: '#3a3a5a' }}>/{DISTRICT_DATA.length}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -426,7 +455,7 @@ export default function App() {
       <div className="flex-none flex justify-center py-2 overflow-hidden">
         <div style={{
           display: 'inline-grid',
-          gridTemplateColumns: 'repeat(7, 24px)',
+          gridTemplateColumns: 'repeat(10, 24px)',
           gridTemplateRows: 'repeat(13, 20px)',
           gap: '3px',
         }}>
@@ -719,6 +748,153 @@ export default function App() {
             onClose={() => setShowDesigner(false)}
             isFever={isFever}
           />
+        )}
+      </AnimatePresence>
+
+      {/* ── Ranking Panel ─────────────────────── */}
+      <AnimatePresence>
+        {showRanking && (
+          <motion.div
+            className="fixed inset-0 flex items-end justify-center"
+            style={{ zIndex: 80 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={() => setShowRanking(false)} />
+            <motion.div
+              className="relative w-full max-w-md overflow-y-auto"
+              style={{
+                maxHeight: '70vh',
+                background: '#0e0e2a',
+                border: '3px solid #2a2a50',
+                borderBottom: 'none',
+                borderTopLeftRadius: 16,
+                borderTopRightRadius: 16,
+              }}
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+            >
+              <div className="flex justify-center pt-3 pb-1">
+                <div style={{ width: 40, height: 4, background: '#2a2a50', borderRadius: 2 }} />
+              </div>
+
+              <div className="px-5 pb-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <span style={{ fontSize: 18 }}>🏆</span>
+                    <span style={{ fontSize: 14, fontWeight: 900, color: '#fbbf24', letterSpacing: 2 }}>
+                      실시간 랭킹
+                    </span>
+                  </div>
+                  <span style={{ fontSize: 9, color: '#5a5a8a', letterSpacing: 1 }}>
+                    LIVE · {DISTRICT_DATA.length}개 지역
+                  </span>
+                </div>
+
+                {ranking.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '24px 0', color: '#5a5a8a', fontSize: 12 }}>
+                    아직 점령된 지역이 없습니다
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {ranking.map((entry, idx) => {
+                      const isPlayer = entry.name === 'player';
+                      const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : null;
+                      const pct = Math.round((entry.count / DISTRICT_DATA.length) * 100);
+                      const color = isPlayer ? PLAYER_COLOR : (NPC_COLORS[entry.name] || '#ff6b6b');
+                      return (
+                        <motion.div
+                          key={entry.name}
+                          initial={{ opacity: 0, x: -20 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: idx * 0.05 }}
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 8,
+                            padding: '8px 10px',
+                            background: isPlayer ? 'rgba(0,229,255,0.08)' : 'rgba(255,255,255,0.02)',
+                            border: `2px solid ${isPlayer ? 'rgba(0,229,255,0.2)' : '#1a1a35'}`,
+                          }}
+                        >
+                          <div style={{
+                            width: 24, textAlign: 'center',
+                            fontSize: medal ? 16 : 11,
+                            fontWeight: 900,
+                            color: medal ? undefined : '#5a5a8a',
+                          }}>
+                            {medal || (idx + 1)}
+                          </div>
+
+                          <div style={{
+                            width: 10, height: 10,
+                            background: color,
+                            border: '1px solid rgba(255,255,255,0.15)',
+                            flexShrink: 0,
+                          }} />
+
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontSize: 11, fontWeight: 900,
+                              color: isPlayer ? PLAYER_COLOR : '#ccccee',
+                              marginBottom: 2,
+                            }}>
+                              {isPlayer ? '나' : entry.name}
+                            </div>
+                            <div style={{
+                              height: 4,
+                              background: '#111128',
+                              border: '1px solid #1a1a35',
+                            }}>
+                              <div style={{
+                                height: '100%',
+                                width: `${pct}%`,
+                                background: color,
+                                transition: 'width 0.3s',
+                              }} />
+                            </div>
+                          </div>
+
+                          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                            <div style={{
+                              fontSize: 14, fontWeight: 900,
+                              color: isPlayer ? PLAYER_COLOR : '#ccccee',
+                            }}>
+                              {entry.count}
+                            </div>
+                            <div style={{ fontSize: 8, color: '#5a5a8a' }}>
+                              {pct}%
+                            </div>
+                          </div>
+                        </motion.div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Unclaimed count */}
+                {(() => {
+                  const unclaimed = districts.filter(d => !d.owner).length;
+                  if (unclaimed === 0) return null;
+                  return (
+                    <div style={{
+                      marginTop: 8, padding: '6px 10px',
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      border: '2px solid #1a1a35',
+                    }}>
+                      <span style={{ fontSize: 10, color: '#3a3a5a', fontWeight: 700 }}>
+                        미점령 지역
+                      </span>
+                      <span style={{ fontSize: 12, color: '#3a3a5a', fontWeight: 900 }}>
+                        {unclaimed}
+                      </span>
+                    </div>
+                  );
+                })()}
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 
