@@ -61,9 +61,11 @@ const UNCLAIMED_BG = '#1e1e3a';
 // 페이스로 ~6시간 + 뺏긴 영토 재점령분이 7일 시즌의 플레이 볼륨.
 const HP_SCALE = 25;
 
-// NPC는 유저가 앱을 보고 있는 동안엔 활동하지 않고, 자리를 비운 사이에만 깨어난다.
+// NPC 속도: 유저가 보고 있는 동안엔 1배로 천천히, 자리를 비우면 3배로 빨라진다.
 // 모든 유저에게 동일하게 적용되는 고정 상수 (랜덤 요소 없음 = 공평).
-const NPC_OFFLINE_DPS = 0.15;                 // 부재 중 전체 NPC 합산 초당 데미지 (유저 연타 ~20dps 대비 훨씬 느림)
+const NPC_ACTIVE_DPS = 0.3;                   // 접속 중 전체 NPC 합산 초당 데미지 (유저 연타 대비 미미한 압박)
+const NPC_OFFLINE_DPS = 0.9;                  // 부재 중 3배 속도
+const NPC_ACTIVE_TICK_MS = 20 * 1000;         // 접속 중 NPC 공격 주기 (틱당 데미지 = DPS × 20초 = 6)
 const NPC_MAX_OFFLINE_MS = 8 * 3600 * 1000;   // 한 번의 부재당 최대 8시간까지만 시뮬레이션 (NPC도 잠은 잔다)
 const NPC_MIN_OFFLINE_MS = 60 * 1000;         // 1분 미만의 이탈로는 NPC가 깨어나지 않음
 const NPC_MAX_THEFTS_PER_ABSENCE = 3;         // 부재 1회당 플레이어 영토는 최대 3개까지만 절도 (초보 전멸 방지)
@@ -227,6 +229,32 @@ function comboMultiplier(combo: number): number {
   if (combo >= 15) return 3;
   if (combo >= 5) return 2;
   return 1;
+}
+
+// ── 콤보 타임 ────────────────────────────────────────
+// 콤보 배율은 하루 1시간의 '콤보 타임'에만 열린다. 시간대는 날짜 문자열
+// 해시로 결정(10~23시 사이)되므로 서버 없이도 모든 유저에게 같은 시각에
+// 열린다 = 공평 + 같은 시간대에 유저가 몰리는 이벤트성.
+function comboWindowFor(date: Date): { start: number; end: number } {
+  const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  const hour = 10 + (h % 14); // 10:00 ~ 23:00 시작 (새벽 배제)
+  const start = new Date(date);
+  start.setHours(hour, 0, 0, 0);
+  return { start: start.getTime(), end: start.getTime() + 3600 * 1000 };
+}
+
+function isComboTime(now: number = Date.now()): boolean {
+  const w = comboWindowFor(new Date(now));
+  return now >= w.start && now < w.end;
+}
+
+// 진행 중이거나 다가올 가장 가까운 콤보 타임 (오늘 지났으면 내일)
+function nextComboWindow(now: number = Date.now()): { start: number; end: number } {
+  const today = comboWindowFor(new Date(now));
+  if (now < today.end) return today;
+  return comboWindowFor(new Date(now + 86400 * 1000));
 }
 
 function ownerColor(owner: string | null): string {
@@ -417,6 +445,8 @@ export default function App() {
   const [timeLeft, setTimeLeft] = useState('');
   const [flashId, setFlashId] = useState<number | null>(null);
   const [invasionReport, setInvasionReport] = useState<InvasionReport | null>(init.report);
+  const [comboTime, setComboTime] = useState(() => isComboTime());
+  const [comboToast, setComboToast] = useState(false);
 
   const [keycapCount, setKeycapCount] = useState(init.keycapCount);
   const [keycapDesigns, setKeycapDesigns] = useState<KeycapDesign[]>(loadKeycapDesigns);
@@ -426,6 +456,7 @@ export default function App() {
   const [showRanking, setShowRanking] = useState(false);
 
   const comboTimer = useRef(0);
+  const comboTimeRef = useRef(isComboTime());
   const feedId = useRef(10);
   const particleId = useRef(0);
   const sound = useRef(createPixelSound());
@@ -435,8 +466,8 @@ export default function App() {
 
   const selected = districts.find(d => d.id === selectedId) ?? null;
   const playerCount = districts.filter(d => d.owner === 'player').length;
-  const mult = comboMultiplier(combo);
-  const isFever = combo >= 30;
+  const mult = comboTime ? comboMultiplier(combo) : 1;
+  const isFever = comboTime && combo >= 30;
   const sz = KEYCAP_SIZE[keycapCount as keyof typeof KEYCAP_SIZE];
 
   const getDesignImage = useCallback((slotIndex: number): string | null => {
@@ -445,9 +476,29 @@ export default function App() {
     return keycapDesigns.find(d => d.id === designId)?.imageData ?? null;
   }, [activeKeycapIds, keycapDesigns]);
 
-  // ── Season Timer ─────────────────────────────────────
+  // ── Season Timer + 콤보 타임 감지 ────────────────────
   useEffect(() => {
-    const t = setInterval(() => setTimeLeft(formatTime(seasonEnd.current - Date.now())), 1000);
+    const t = setInterval(() => {
+      setTimeLeft(formatTime(seasonEnd.current - Date.now()));
+
+      const active = isComboTime();
+      if (active !== comboTimeRef.current) {
+        comboTimeRef.current = active;
+        setComboTime(active);
+        if (active) {
+          // 앱을 보고 있는 중에 콤보 타임이 열리면 즉시 알림
+          setComboToast(true);
+          setTimeout(() => setComboToast(false), 2600);
+          sound.current.combo(3);
+          if (navigator.vibrate) navigator.vibrate([30, 30, 30]);
+          setFeed(f => [{ id: ++feedId.current, text: '🔥 콤보 타임 시작! 1시간 동안 콤보 배율 최대 ×8!', type: 'system' as const }, ...f].slice(0, 30));
+        } else {
+          comboRef.current = 0;
+          setCombo(0);
+          setFeed(f => [{ id: ++feedId.current, text: '⏰ 콤보 타임 종료! 내일 다시 열립니다', type: 'system' as const }, ...f].slice(0, 30));
+        }
+      }
+    }, 1000);
     return () => clearInterval(t);
   }, []);
 
@@ -547,6 +598,46 @@ export default function App() {
     };
   }, []);
 
+  // ── NPC: 접속 중에도 1배 속도로 활동 ─────────────────
+  // 20초마다 한 번씩 공격한다 (틱당 6 데미지 = NPC_ACTIVE_DPS × 20초).
+  // 3틱에 1번만 플레이어 영토를 노리고 나머지는 미점령지로 확장 —
+  // 플레이 중 압박은 느껴지되 유저 연타 화력에 압도적으로 밀리는 수준.
+  useEffect(() => {
+    let tickN = 0;
+    const t = setInterval(() => {
+      // 화면이 안 보이는 동안은 부재 시뮬레이션 담당 (이중 계산 방지)
+      if (document.visibilityState !== 'visible' || hiddenAtRef.current !== null) return;
+      tickN++;
+      const dmg = Math.round(NPC_ACTIVE_DPS * (NPC_ACTIVE_TICK_MS / 1000));
+      const lands = districtsRef.current;
+      const playerLands = lands.filter(d => d.owner === 'player');
+      const attackPlayer = tickN % 3 === 0 && playerLands.length > 1;
+      const pool = attackPlayer ? playerLands : lands.filter(d => !d.owner);
+      if (!pool.length) return;
+      const target = pool.reduce((m, d) => (d.currentHp < m.currentHp ? d : m));
+      const npc = NPC_NAMES[tickN % NPC_NAMES.length];
+      const hp = target.currentHp - dmg;
+      const won = hp <= 0;
+      const wasPlayers = target.owner === 'player';
+
+      const updated = lands.map(d => d.id === target.id
+        ? (won ? { ...d, currentHp: d.maxHp, owner: npc } : { ...d, currentHp: hp })
+        : d);
+      districtsRef.current = updated;
+      setDistricts(updated);
+
+      const pushFeed = (text: string) =>
+        setFeed(f => [{ id: ++feedId.current, text, type: 'npc' as const }, ...f].slice(0, 30));
+      if (won) {
+        pushFeed(`💥 ${npc} → [${districtLabel(target)}] 점령!`);
+        if (wasPlayers) sound.current.npcAlert();
+      } else if (wasPlayers) {
+        pushFeed(`⚡ ${npc} → [${districtLabel(target)}] -${dmg}`);
+      }
+    }, NPC_ACTIVE_TICK_MS);
+    return () => clearInterval(t);
+  }, []);
+
   // ── Helpers ──────────────────────────────────────────
   const addFeed = useCallback((text: string, type: FeedEntry['type']) => {
     setFeed(f => [{ id: ++feedId.current, text, type }, ...f].slice(0, 30));
@@ -573,17 +664,20 @@ export default function App() {
     const target = districtsRef.current.find(d => d.id === selectedId);
     if (!target || target.owner === 'player') return;
 
-    comboRef.current += 1;
-    const c = comboRef.current;
-    const dmg = comboMultiplier(c);
-    setCombo(c);
-    if (c > bestCombo) setBestCombo(c);
+    // 콤보 배율은 하루 1시간 '콤보 타임'에만 열린다 — 평상시 탭은 고정 1 데미지
+    let dmg = 1;
+    if (comboTimeRef.current) {
+      comboRef.current += 1;
+      const c = comboRef.current;
+      dmg = comboMultiplier(c);
+      setCombo(c);
+      if (c > bestCombo) setBestCombo(c);
+      clearTimeout(comboTimer.current);
+      comboTimer.current = window.setTimeout(() => { comboRef.current = 0; setCombo(0); }, 1500);
+      if ([5, 15, 30, 50].includes(c)) sound.current.combo(Math.ceil(c / 15));
+    }
     setTotalTaps(t => t + 1);
 
-    clearTimeout(comboTimer.current);
-    comboTimer.current = window.setTimeout(() => { comboRef.current = 0; setCombo(0); }, 1500);
-
-    if ([5, 15, 30, 50].includes(c)) sound.current.combo(Math.ceil(c / 15));
     sound.current.tap();
     if (navigator.vibrate) navigator.vibrate(12);
 
@@ -752,6 +846,55 @@ export default function App() {
           <div style={{ width: 6, height: 6, background: UNCLAIMED_BG, border: '1px solid #333' }} />
           <span className="text-[8px]" style={{ color: '#6a6a9a' }}>미점령</span>
         </div>
+      </div>
+
+      {/* ── Combo Time Banner ────────────────────── */}
+      <div className="flex-none px-5 pb-1">
+        {comboTime ? (() => {
+          const w = comboWindowFor(new Date());
+          const remain = Math.max(0, w.end - Date.now());
+          const mm = Math.floor(remain / 60000);
+          const ss = Math.floor((remain % 60000) / 1000);
+          return (
+            <motion.div
+              animate={{ opacity: [1, 0.7, 1] }}
+              transition={{ repeat: Infinity, duration: 1.2 }}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                border: '2px solid #fbbf24',
+                background: 'rgba(251,191,36,0.1)',
+                padding: '4px 8px',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 900, color: '#fbbf24' }}>
+                🔥 콤보 타임! 배율 최대 ×8
+              </span>
+              <span style={{ fontSize: 10, fontWeight: 900, color: '#fbbf24' }}>
+                {mm}:{String(ss).padStart(2, '0')} 남음
+              </span>
+            </motion.div>
+          );
+        })() : (() => {
+          const w = nextComboWindow();
+          const startDate = new Date(w.start);
+          const isToday = startDate.getDate() === new Date().getDate();
+          const hh = String(startDate.getHours()).padStart(2, '0');
+          const eh = String(new Date(w.end).getHours()).padStart(2, '0');
+          return (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              border: '2px solid #1a1a35',
+              padding: '4px 8px',
+            }}>
+              <span style={{ fontSize: 9, color: '#5a5a8a', fontWeight: 700 }}>
+                ⚡ {isToday ? '오늘' : '내일'}의 콤보 타임
+              </span>
+              <span style={{ fontSize: 10, color: '#8888bb', fontWeight: 900 }}>
+                {hh}:00 ~ {eh}:00
+              </span>
+            </div>
+          );
+        })()}
       </div>
 
       {/* ── Selected District HP ────────────────── */}
@@ -979,6 +1122,42 @@ export default function App() {
               </div>
               <div style={{ color: '#fbbf24', fontSize: 11, fontWeight: 700, letterSpacing: 3, marginTop: 4 }}>
                 점 령 완 료
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Combo Time Toast ─────────────────────── */}
+      <AnimatePresence>
+        {comboToast && (
+          <motion.div
+            className="fixed inset-0 flex items-center justify-center pointer-events-none"
+            style={{ zIndex: 75 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              initial={{ scale: 0.4, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 1.3, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 16 }}
+              style={{
+                background: '#0a0a1e',
+                border: '4px solid',
+                borderColor: '#fbbf24 #7a5a10 #7a5a10 #fbbf24',
+                padding: '16px 28px',
+                textAlign: 'center',
+                boxShadow: '0 0 40px rgba(251,191,36,0.35)',
+              }}
+            >
+              <div style={{ fontSize: 28, marginBottom: 4 }}>🔥</div>
+              <div style={{ color: '#fbbf24', fontSize: 16, fontWeight: 900, letterSpacing: 2 }}>
+                콤보 타임 시작!
+              </div>
+              <div style={{ color: '#ccccee', fontSize: 10, fontWeight: 700, marginTop: 4 }}>
+                지금부터 1시간, 콤보 배율 최대 ×8
               </div>
             </motion.div>
           </motion.div>
