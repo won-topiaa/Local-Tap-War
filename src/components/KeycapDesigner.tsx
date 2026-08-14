@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
+import * as toss from '../platform/toss';
 
 export interface KeycapDesign {
   id: string;
@@ -93,6 +94,28 @@ export function KeycapDesigner({
     e.target.value = '';
   }, [handleFile]);
 
+  // 토스 웹뷰 안에서는 네이티브 피커를 쓴다. <input type=file capture>는 호스트 앱의
+  // 파일 선택기 구현과 카메라 권한 선언에 의존해서 동작을 보장할 수 없다.
+  const pickNative = useCallback(async (mode: 'camera' | 'album') => {
+    setIsProcessing(true);
+    try {
+      const dataUri = mode === 'camera' ? await toss.takePhoto() : await toss.pickPhoto();
+      if (dataUri) { setPreview(dataUri); setDesignName(''); }
+    } finally {
+      setIsProcessing(false);
+    }
+  }, []);
+
+  const openCamera = useCallback(() => {
+    if (toss.isNativeMediaAvailable()) void pickNative('camera');
+    else cameraInputRef.current?.click();
+  }, [pickNative]);
+
+  const openAlbum = useCallback(() => {
+    if (toss.isNativeMediaAvailable()) void pickNative('album');
+    else fileInputRef.current?.click();
+  }, [pickNative]);
+
   const handleSave = useCallback(() => {
     if (!preview) return;
     const design: KeycapDesign = {
@@ -179,7 +202,7 @@ export function KeycapDesigner({
               </p>
               <div className="flex gap-3">
                 <button
-                  onClick={() => cameraInputRef.current?.click()}
+                  onClick={openCamera}
                   className={`flex-1 py-4 rounded-2xl font-bold text-sm flex flex-col items-center gap-1.5 transition-colors ${
                     isFever ? 'bg-white/10 text-white active:bg-white/15' : 'bg-blue-50 text-blue-600 active:bg-blue-100'
                   }`}
@@ -188,7 +211,7 @@ export function KeycapDesigner({
                   사진 촬영
                 </button>
                 <button
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={openAlbum}
                   className={`flex-1 py-4 rounded-2xl font-bold text-sm flex flex-col items-center gap-1.5 transition-colors ${
                     isFever ? 'bg-white/10 text-white active:bg-white/15' : 'bg-purple-50 text-purple-600 active:bg-purple-100'
                   }`}

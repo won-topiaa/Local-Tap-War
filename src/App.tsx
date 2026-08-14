@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
 import { Onboarding } from './components/Onboarding';
+import * as toss from './platform/toss';
 
 // ═══════════════════════════════════════════════════════════
 // Types
@@ -295,13 +296,13 @@ function comboWindowFor(date: Date): { start: number; end: number } {
   return { start: start.getTime(), end: start.getTime() + 3600 * 1000 };
 }
 
-function isComboTime(now: number = Date.now()): boolean {
+function isComboTime(now: number = toss.now()): boolean {
   const w = comboWindowFor(new Date(now));
   return now >= w.start && now < w.end;
 }
 
 // 진행 중이거나 다가올 가장 가까운 콤보 타임 (오늘 지났으면 내일)
-function nextComboWindow(now: number = Date.now()): { start: number; end: number } {
+function nextComboWindow(now: number = toss.now()): { start: number; end: number } {
   const today = comboWindowFor(new Date(now));
   if (now < today.end) return today;
   return comboWindowFor(new Date(now + 86400 * 1000));
@@ -561,6 +562,49 @@ export default function App() {
     return keycapDesigns.find(d => d.id === designId)?.imageData ?? null;
   }, [activeKeycapIds, keycapDesigns]);
 
+  // ── 앱인토스 플랫폼 연동 ─────────────────────────────
+  // 서버 시간 동기화(콤보 타임을 모든 유저에게 같은 시각에 열기),
+  // 연타 중 화면 꺼짐 방지, safe area 반영.
+  const [insets, setInsets] = useState<toss.Insets | null>(() => toss.getSafeAreaInsets());
+  useEffect(() => {
+    void toss.syncServerClock().then(() => {
+      const active = isComboTime();
+      comboTimeRef.current = active;
+      setComboTime(active);
+    });
+    toss.keepScreenAwake(true);
+    const unsub = toss.subscribeSafeArea(setInsets);
+    return () => {
+      toss.keepScreenAwake(false);
+      unsub();
+    };
+  }, []);
+
+  // 시스템 뒤로가기: 열린 화면이 있으면 그것만 닫고, 없으면 미니앱을 종료한다.
+  // (심사 기준 — 모든 화면에서 뒤로가기가 정상 동작해야 함)
+  const backStateRef = useRef({ showRanking, showDesigner, invasionReport, showOnboarding });
+  useEffect(() => {
+    backStateRef.current = { showRanking, showDesigner, invasionReport, showOnboarding };
+  }, [showRanking, showDesigner, invasionReport, showOnboarding]);
+  useEffect(() => toss.subscribeBack(() => {
+    const s = backStateRef.current;
+    if (s.showOnboarding) return;           // 동네 선택 전에는 종료도 이탈도 막는다
+    if (s.showDesigner) { setShowDesigner(false); return; }
+    if (s.showRanking) { setShowRanking(false); return; }
+    if (s.invasionReport) { setInvasionReport(null); return; }
+    toss.closeApp();
+  }), []);
+
+  // 토스 게임센터 리더보드에 점령 영토 수를 제출 (게임 카테고리 필수 항목)
+  const lastSubmitted = useRef(-1);
+  useEffect(() => {
+    const count = districts.filter(d => d.owner === 'player').length;
+    if (count === lastSubmitted.current) return;
+    lastSubmitted.current = count;
+    const t = setTimeout(() => void toss.submitLeaderboardScore(count), 2000);
+    return () => clearTimeout(t);
+  }, [districts]);
+
   // ── Season Timer + 콤보 타임 감지 ────────────────────
   useEffect(() => {
     const t = setInterval(() => {
@@ -575,7 +619,7 @@ export default function App() {
           setComboToast(true);
           setTimeout(() => setComboToast(false), 2600);
           sound.current.combo(3);
-          if (navigator.vibrate) navigator.vibrate([30, 30, 30]);
+          toss.haptic('success');
           setFeed(f => [{ id: ++feedId.current, text: '🔥 콤보 타임 시작! 1시간 동안 콤보 배율 최대 ×4!', type: 'system' as const }, ...f].slice(0, 30));
         } else {
           comboRef.current = 0;
@@ -662,6 +706,7 @@ export default function App() {
           ...f,
         ].slice(0, 30));
         sound.current.npcAlert();
+        toss.haptic('error');
       }
       if (thefts.length || otherConquests > 0) {
         setInvasionReport({ thefts, otherConquests });
@@ -734,7 +779,7 @@ export default function App() {
       if (won) {
         recordCapture(npc);
         pushFeed(`💥 ${npc} → [${districtLabel(target)}] 점령!`);
-        if (wasPlayers) sound.current.npcAlert();
+        if (wasPlayers) { sound.current.npcAlert(); toss.haptic('error'); }
       } else if (wasPlayers) {
         pushFeed(`⚡ ${npc} → [${districtLabel(target)}] -${dmg}`);
       }
@@ -784,7 +829,7 @@ export default function App() {
     setTotalTaps(t => t + 1);
 
     sound.current.tap();
-    if (navigator.vibrate) navigator.vibrate(12);
+    toss.haptic('tap');
 
     const el = keycapRefs.current[keycapIdx];
     if (el) {
@@ -822,13 +867,13 @@ export default function App() {
         .every(d => d.owner === 'player');
 
       if (regionComplete) {
-        if (navigator.vibrate) navigator.vibrate([60, 40, 60, 40, 100]);
+        toss.haptic('confetti');
         sound.current.combo(3);
         setRegionDone(target.region);
         setTimeout(() => setRegionDone(null), 2400);
         addFeed(`👑 [${target.region}] 전 지역 정복 완료!`, 'player');
       } else {
-        if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+        toss.haptic('success');
         setConquestName(districtLabel(target));
         setTimeout(() => setConquestName(null), 1500);
         addFeed(`🏴 [${districtLabel(target)}] 점령 완료!`, 'player');
@@ -915,7 +960,23 @@ export default function App() {
 
   // ── Render ───────────────────────────────────────────
   return (
-    <div className="h-screen w-full flex flex-col overflow-hidden" style={{ background: '#0a0a1e', fontFamily: "'Courier New', monospace" }}>
+    <div
+      className="w-full flex flex-col overflow-hidden"
+      style={{
+        // 100dvh: 토스 웹뷰 하단 바가 있을 때 100vh는 보이는 영역보다 커진다
+        height: '100dvh',
+        background: '#0a0a1e',
+        fontFamily: "'Courier New', monospace",
+        // SDK가 주는 safe area를 우선 적용하고, 밖에서는 CSS env()가 담당한다
+        ...(insets ? {
+          paddingTop: insets.top,
+          paddingBottom: insets.bottom,
+          paddingLeft: insets.left,
+          paddingRight: insets.right,
+          boxSizing: 'border-box' as const,
+        } : null),
+      }}
+    >
 
       {/* ── Header ──────────────────────────────── */}
       <div className="flex-none px-4 pt-3 pb-2" style={{ borderBottom: '2px solid #1a1a35' }}>
@@ -1018,8 +1079,8 @@ export default function App() {
       {/* ── Combo Time Banner ────────────────────── */}
       <div className="flex-none px-5 pb-1">
         {comboTime ? (() => {
-          const w = comboWindowFor(new Date());
-          const remain = Math.max(0, w.end - Date.now());
+          const w = comboWindowFor(new Date(toss.now()));
+          const remain = Math.max(0, w.end - toss.now());
           const mm = Math.floor(remain / 60000);
           const ss = Math.floor((remain % 60000) / 1000);
           return (
@@ -1044,7 +1105,7 @@ export default function App() {
         })() : (() => {
           const w = nextComboWindow();
           const startDate = new Date(w.start);
-          const isToday = startDate.getDate() === new Date().getDate();
+          const isToday = startDate.getDate() === new Date(toss.now()).getDate();
           const hh = String(startDate.getHours()).padStart(2, '0');
           const eh = String(new Date(w.end).getHours()).padStart(2, '0');
           return (
@@ -1576,6 +1637,24 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+
+                {/* 토스 게임센터 리더보드 — 전체 유저 순위 */}
+                {toss.isLeaderboardAvailable() && (
+                  <button
+                    onClick={() => void toss.openLeaderboard()}
+                    style={{
+                      width: '100%', padding: '8px 0', marginBottom: 10,
+                      background: '#1a1a35',
+                      border: '2px solid #3182F6',
+                      color: '#8ab4ff',
+                      fontSize: 10, fontWeight: 900, letterSpacing: 1,
+                      cursor: 'pointer',
+                      fontFamily: "'Courier New', monospace",
+                    }}
+                  >
+                    🏅 토스 게임센터 전체 순위 보기
+                  </button>
+                )}
 
                 {rankTab === 'gain' ? (
                   gainRanking.length === 0 ? (
