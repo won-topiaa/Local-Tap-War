@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
+import * as toss from '../platform/toss';
 
 export interface KeycapDesign {
   id: string;
@@ -10,9 +11,11 @@ export interface KeycapDesign {
 
 interface KeycapDesignerProps {
   designs: KeycapDesign[];
-  activeDesignId: string | null;
+  activeDesignIds: (string | null)[];
+  initialSlot: number;
+  slotCount: number;
   onSaveDesign: (design: KeycapDesign) => void;
-  onSelectDesign: (id: string | null) => void;
+  onSelectDesign: (slotIndex: number, id: string | null) => void;
   onDeleteDesign: (id: string) => void;
   onClose: () => void;
   isFever: boolean;
@@ -49,9 +52,16 @@ function resizeImage(file: File, maxSize: number): Promise<string> {
   });
 }
 
+function getDesignImage(designs: KeycapDesign[], id: string | null): string | null {
+  if (!id) return null;
+  return designs.find((d) => d.id === id)?.imageData ?? null;
+}
+
 export function KeycapDesigner({
   designs,
-  activeDesignId,
+  activeDesignIds,
+  initialSlot,
+  slotCount,
   onSaveDesign,
   onSelectDesign,
   onDeleteDesign,
@@ -61,6 +71,7 @@ export function KeycapDesigner({
   const [preview, setPreview] = useState<string | null>(null);
   const [designName, setDesignName] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [selectedSlot, setSelectedSlot] = useState(initialSlot);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -83,6 +94,28 @@ export function KeycapDesigner({
     e.target.value = '';
   }, [handleFile]);
 
+  // 토스 웹뷰 안에서는 네이티브 피커를 쓴다. <input type=file capture>는 호스트 앱의
+  // 파일 선택기 구현과 카메라 권한 선언에 의존해서 동작을 보장할 수 없다.
+  const pickNative = useCallback(async (mode: 'camera' | 'album') => {
+    setIsProcessing(true);
+    try {
+      const dataUri = mode === 'camera' ? await toss.takePhoto() : await toss.pickPhoto();
+      if (dataUri) { setPreview(dataUri); setDesignName(''); }
+    } finally {
+      setIsProcessing(false);
+    }
+  }, []);
+
+  const openCamera = useCallback(() => {
+    if (toss.isNativeMediaAvailable()) void pickNative('camera');
+    else cameraInputRef.current?.click();
+  }, [pickNative]);
+
+  const openAlbum = useCallback(() => {
+    if (toss.isNativeMediaAvailable()) void pickNative('album');
+    else fileInputRef.current?.click();
+  }, [pickNative]);
+
   const handleSave = useCallback(() => {
     if (!preview) return;
     const design: KeycapDesign = {
@@ -92,10 +125,12 @@ export function KeycapDesigner({
       createdAt: Date.now(),
     };
     onSaveDesign(design);
-    onSelectDesign(design.id);
+    onSelectDesign(selectedSlot, design.id);
     setPreview(null);
     setDesignName('');
-  }, [preview, designName, designs.length, onSaveDesign, onSelectDesign]);
+  }, [preview, designName, designs.length, onSaveDesign, onSelectDesign, selectedSlot]);
+
+  const currentDesignId = activeDesignIds[selectedSlot] ?? null;
 
   return (
     <motion.div
@@ -104,10 +139,8 @@ export function KeycapDesigner({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
-      {/* Backdrop */}
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
 
-      {/* Sheet */}
       <motion.div
         className={`relative w-full max-w-md max-h-[85vh] rounded-t-3xl overflow-y-auto ${
           isFever ? 'bg-indigo-950' : 'bg-white'
@@ -117,7 +150,6 @@ export function KeycapDesigner({
         exit={{ y: '100%' }}
         transition={{ type: 'spring', damping: 25, stiffness: 300 }}
       >
-        {/* Handle */}
         <div className="flex justify-center pt-3 pb-2">
           <div className={`w-10 h-1 rounded-full ${isFever ? 'bg-white/20' : 'bg-gray-300'}`} />
         </div>
@@ -127,6 +159,41 @@ export function KeycapDesigner({
             🎨 키캡 디자인
           </h2>
 
+          {/* Slot selector */}
+          <div className="mb-5">
+            <p className={`text-xs mb-2 ${isFever ? 'text-indigo-300' : 'text-gray-500'}`}>
+              꾸밀 키캡 선택
+            </p>
+            <div className="flex justify-center gap-4">
+              {Array.from({length: slotCount}, (_, i) => i).map((slot) => {
+                const img = getDesignImage(designs, activeDesignIds[slot] ?? null);
+                return (
+                  <button
+                    key={slot}
+                    onClick={() => setSelectedSlot(slot)}
+                    className={`relative flex flex-col items-center gap-1 p-2 rounded-xl transition-all ${
+                      selectedSlot === slot
+                        ? (isFever ? 'bg-yellow-400/20 ring-2 ring-yellow-400 scale-105' : 'bg-blue-50 ring-2 ring-blue-500 scale-105')
+                        : (isFever ? 'bg-white/5' : 'bg-gray-50')
+                    }`}
+                  >
+                    <div className="keycap-slot-body">
+                      <div
+                        className="keycap-slot-top"
+                        style={img ? { backgroundImage: `url(${img})` } : undefined}
+                      >
+                        {!img && <span className="text-lg">👊</span>}
+                      </div>
+                    </div>
+                    <span className={`text-[10px] font-bold ${isFever ? 'text-white' : 'text-gray-600'}`}>
+                      #{slot + 1}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Upload section */}
           {!preview ? (
             <div className="space-y-3 mb-6">
@@ -135,7 +202,7 @@ export function KeycapDesigner({
               </p>
               <div className="flex gap-3">
                 <button
-                  onClick={() => cameraInputRef.current?.click()}
+                  onClick={openCamera}
                   className={`flex-1 py-4 rounded-2xl font-bold text-sm flex flex-col items-center gap-1.5 transition-colors ${
                     isFever ? 'bg-white/10 text-white active:bg-white/15' : 'bg-blue-50 text-blue-600 active:bg-blue-100'
                   }`}
@@ -144,7 +211,7 @@ export function KeycapDesigner({
                   사진 촬영
                 </button>
                 <button
-                  onClick={() => fileInputRef.current?.click()}
+                  onClick={openAlbum}
                   className={`flex-1 py-4 rounded-2xl font-bold text-sm flex flex-col items-center gap-1.5 transition-colors ${
                     isFever ? 'bg-white/10 text-white active:bg-white/15' : 'bg-purple-50 text-purple-600 active:bg-purple-100'
                   }`}
@@ -170,13 +237,11 @@ export function KeycapDesigner({
               />
             </div>
           ) : (
-            /* Preview + save */
             <div className="mb-6">
               <p className={`text-xs mb-3 ${isFever ? 'text-indigo-300' : 'text-gray-500'}`}>
-                미리보기
+                미리보기 (키캡 #{selectedSlot + 1}에 적용)
               </p>
               <div className="flex items-start gap-4">
-                {/* Mini keycap preview */}
                 <div className="flex-shrink-0">
                   <div className="keycap-preview-body">
                     <div
@@ -231,12 +296,11 @@ export function KeycapDesigner({
               내 키캡 컬렉션 ({designs.length})
             </h3>
 
-            {/* Default (no image) option */}
             <div className="grid grid-cols-4 gap-3">
               <button
-                onClick={() => onSelectDesign(null)}
+                onClick={() => onSelectDesign(selectedSlot, null)}
                 className={`flex flex-col items-center gap-1 p-2 rounded-xl transition-colors ${
-                  activeDesignId === null
+                  currentDesignId === null
                     ? (isFever ? 'bg-yellow-400/20 ring-2 ring-yellow-400' : 'bg-blue-50 ring-2 ring-blue-500')
                     : (isFever ? 'bg-white/5' : 'bg-gray-50')
                 }`}
@@ -254,9 +318,9 @@ export function KeycapDesigner({
               {designs.map((d) => (
                 <div key={d.id} className="relative">
                   <button
-                    onClick={() => onSelectDesign(d.id)}
+                    onClick={() => onSelectDesign(selectedSlot, d.id)}
                     className={`w-full flex flex-col items-center gap-1 p-2 rounded-xl transition-colors ${
-                      activeDesignId === d.id
+                      currentDesignId === d.id
                         ? (isFever ? 'bg-yellow-400/20 ring-2 ring-yellow-400' : 'bg-blue-50 ring-2 ring-blue-500')
                         : (isFever ? 'bg-white/5' : 'bg-gray-50')
                     }`}
@@ -307,6 +371,31 @@ export function KeycapDesigner({
             border-radius: 10px;
             background-size: cover;
             background-position: center;
+            box-shadow:
+              inset 0 1px 0 rgba(255,255,255,0.4),
+              inset 0 -1px 1px rgba(0,0,0,0.05);
+          }
+          .keycap-slot-body {
+            width: 54px;
+            height: 54px;
+            border-radius: 10px;
+            background: linear-gradient(to bottom, #c8ccd0, #9ea3a8);
+            box-shadow:
+              0 3px 0 0 #787d82,
+              0 4px 0 0 #6b7075,
+              0 5px 8px rgba(0,0,0,0.2);
+            padding: 4px;
+          }
+          .keycap-slot-top {
+            width: 100%;
+            height: 100%;
+            border-radius: 7px;
+            background-size: cover;
+            background-position: center;
+            background-color: #e8ecf0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             box-shadow:
               inset 0 1px 0 rgba(255,255,255,0.4),
               inset 0 -1px 1px rgba(0,0,0,0.05);
