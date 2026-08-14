@@ -314,6 +314,14 @@ function ownerColor(owner: string | null): string {
   return NPC_COLORS[owner] || '#ff6b6b';
 }
 
+// 전국 대비 점유율. 초반에 0%로 보이지 않도록 10% 미만은 소수 한 자리까지.
+function formatShare(owned: number): string {
+  const pct = (owned / DISTRICT_DATA.length) * 100;
+  if (pct === 0) return '0';
+  if (pct < 10) return pct.toFixed(1);
+  return String(Math.round(pct));
+}
+
 function formatTime(ms: number): string {
   if (ms <= 0) return '00:00:00';
   const s = Math.floor(ms / 1000);
@@ -595,15 +603,17 @@ export default function App() {
     toss.closeApp();
   }), []);
 
-  // 토스 게임센터 리더보드에 점령 영토 수를 제출 (게임 카테고리 필수 항목)
+  // 토스 게임센터 리더보드에 시즌 누적 점령 횟수를 제출 (게임 카테고리 필수 항목).
+  // 보유 영토 수는 230에서 포화되고 매일 오르내려 순위가 잘 갈리지 않는 반면,
+  // 누적 점령은 단조 증가라 꾸준히 플레이한 만큼 순위에 반영된다.
   const lastSubmitted = useRef(-1);
   useEffect(() => {
-    const count = districts.filter(d => d.owner === 'player').length;
-    if (count === lastSubmitted.current) return;
-    lastSubmitted.current = count;
-    const t = setTimeout(() => void toss.submitLeaderboardScore(count), 2000);
+    const total = captureStats.player?.total ?? 0;
+    if (total === lastSubmitted.current) return;
+    lastSubmitted.current = total;
+    const t = setTimeout(() => void toss.submitLeaderboardScore(total), 2000);
     return () => clearTimeout(t);
-  }, [districts]);
+  }, [captureStats]);
 
   // ── Season Timer + 콤보 타임 감지 ────────────────────
   useEffect(() => {
@@ -1004,10 +1014,11 @@ export default function App() {
             </button>
             <div className="text-right">
               <div className="text-[9px] tracking-[2px]" style={{ color: '#5a5a8a' }}>점령</div>
-              <div className="flex items-baseline gap-0.5">
-                <span className="text-xl font-bold" style={{ color: PLAYER_COLOR }}>{playerCount}</span>
-                <span className="text-xs" style={{ color: '#3a3a5a' }}>/{DISTRICT_DATA.length}</span>
+              <div className="flex items-baseline justify-end gap-0.5">
+                <span className="text-xl font-bold" style={{ color: PLAYER_COLOR }}>{formatShare(playerCount)}</span>
+                <span className="text-xs" style={{ color: PLAYER_COLOR }}>%</span>
               </div>
+              <div className="text-[9px]" style={{ color: '#3a3a5a' }}>{playerCount}/{DISTRICT_DATA.length}곳</div>
             </div>
           </div>
         </div>
@@ -1740,6 +1751,7 @@ export default function App() {
                     {ranking.map((entry, idx) => {
                       const isPlayer = entry.name === 'player';
                       const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : null;
+                      const share = formatShare(entry.count);
                       const pct = Math.round((entry.count / DISTRICT_DATA.length) * 100);
                       const color = isPlayer ? PLAYER_COLOR : (NPC_COLORS[entry.name] || '#ff6b6b');
                       return (
@@ -1798,10 +1810,10 @@ export default function App() {
                               fontSize: 14, fontWeight: 900,
                               color: isPlayer ? PLAYER_COLOR : '#ccccee',
                             }}>
-                              {entry.count}
+                              {share}%
                             </div>
                             <div style={{ fontSize: 8, color: '#5a5a8a' }}>
-                              {pct}%
+                              {entry.count}곳
                             </div>
                           </div>
                         </motion.div>
