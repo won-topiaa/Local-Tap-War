@@ -795,7 +795,7 @@ export default function App() {
       }
     }, NPC_ACTIVE_TICK_MS);
     return () => clearInterval(t);
-  }, []);
+  }, [recordCapture]);
 
   // ── Helpers ──────────────────────────────────────────
   const addFeed = useCallback((text: string, type: FeedEntry['type']) => {
@@ -892,7 +892,7 @@ export default function App() {
       const nxt = nextTarget(target, updated);
       setTimeout(() => setSelectedId(nxt), 200);
     }
-  }, [selectedId, bestCombo, addFeed, nextTarget]);
+  }, [selectedId, bestCombo, addFeed, nextTarget, recordCapture]);
 
   // ── Onboarding: 우리 동네 선택 ───────────────────────
   // 고른 동네는 HP 절반으로 시작해 첫 점령까지의 거리를 좁히고,
