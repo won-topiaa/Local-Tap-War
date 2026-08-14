@@ -41,6 +41,9 @@ interface InvasionReport {
   otherConquests: number;
 }
 
+// 시즌 누적 점령 기록 — total: 전체 점령 횟수, combo: 그중 콤보 타임에 한 점령
+type CaptureStats = Record<string, { total: number; combo: number }>;
+
 // ═══════════════════════════════════════════════════════════
 // Constants & Mock Data
 // ═══════════════════════════════════════════════════════════
@@ -194,7 +197,16 @@ const KEYCAP_SIZE = {
 
 function createPixelSound() {
   let ctx: AudioContext | null = null;
+  let noiseBuf: AudioBuffer | null = null;
   const getCtx = () => { if (!ctx) ctx = new AudioContext(); return ctx; };
+  const getNoise = (c: AudioContext) => {
+    if (!noiseBuf) {
+      noiseBuf = c.createBuffer(1, Math.floor(c.sampleRate * 0.05), c.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    }
+    return noiseBuf;
+  };
 
   function beep(freq: number, dur: number, vol = 0.08, delay = 0) {
     try {
@@ -211,8 +223,41 @@ function createPixelSound() {
     } catch { /* audio not available */ }
   }
 
+  // 기계식 키보드 타건음 합성: 밴드패스 노이즈 클릭(스위치 소리) +
+  // 짧은 저음(키가 바닥을 치는 소리). 매번 피치를 살짝 흔들어 기계적 반복감 제거.
+  function keypress() {
+    try {
+      const c = getCtx();
+      const t = c.currentTime;
+
+      const noise = c.createBufferSource();
+      noise.buffer = getNoise(c);
+      const bp = c.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 2600 + Math.random() * 1000;
+      bp.Q.value = 1.4;
+      const ng = c.createGain();
+      ng.gain.setValueAtTime(0.18, t);
+      ng.gain.exponentialRampToValueAtTime(0.001, t + 0.028);
+      noise.connect(bp).connect(ng).connect(c.destination);
+      noise.start(t);
+      noise.stop(t + 0.035);
+
+      const thump = c.createOscillator();
+      thump.type = 'triangle';
+      thump.frequency.setValueAtTime(140 + Math.random() * 40, t);
+      thump.frequency.exponentialRampToValueAtTime(65, t + 0.04);
+      const tg = c.createGain();
+      tg.gain.setValueAtTime(0.22, t);
+      tg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+      thump.connect(tg).connect(c.destination);
+      thump.start(t);
+      thump.stop(t + 0.055);
+    } catch { /* audio not available */ }
+  }
+
   return {
-    tap: () => beep(440 + Math.random() * 80, 0.04),
+    tap: keypress,
     combo: (n: number) => { for (let i = 0; i < Math.min(n, 3); i++) beep(523 * (1 + i * 0.25), 0.07, 0.06, i * 0.06); },
     conquest: () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.1, 0.1, i * 0.1)),
     npcAlert: () => beep(220, 0.12, 0.04),
@@ -278,13 +323,14 @@ function formatTime(ms: number): string {
 function simulateNpcOffline(
   districts: District[],
   elapsedMs: number,
-): { districts: District[]; thefts: TheftEvent[]; otherConquests: number } {
+): { districts: District[]; thefts: TheftEvent[]; otherConquests: number; conquestsBy: Record<string, number> } {
   const cappedMs = Math.min(elapsedMs, NPC_MAX_OFFLINE_MS);
   let budget = Math.floor((cappedMs / 1000) * NPC_OFFLINE_DPS);
-  if (budget <= 0) return { districts, thefts: [], otherConquests: 0 };
+  if (budget <= 0) return { districts, thefts: [], otherConquests: 0, conquestsBy: {} };
 
   const next = districts.map(d => ({ ...d }));
   const thefts: TheftEvent[] = [];
+  const conquestsBy: Record<string, number> = {};
   let otherConquests = 0;
   let npcIdx = Math.floor(elapsedMs / 1000) % NPC_NAMES.length;
 
@@ -303,6 +349,7 @@ function simulateNpcOffline(
     if (target.currentHp <= 0) {
       const npc = NPC_NAMES[npcIdx % NPC_NAMES.length];
       npcIdx++;
+      conquestsBy[npc] = (conquestsBy[npc] || 0) + 1;
       if (target.owner === 'player') {
         thefts.push({ npc, districtId: target.id, districtName: districtLabel(target) });
       } else {
@@ -313,7 +360,17 @@ function simulateNpcOffline(
     }
   }
 
-  return { districts: next, thefts, otherConquests };
+  return { districts: next, thefts, otherConquests, conquestsBy };
+}
+
+// 부재 시뮬레이션의 점령 횟수(콤보 타임 판정 불가 → total만)를 누적 기록에 합산
+function mergeCaptures(base: CaptureStats, gains: Record<string, number>): CaptureStats {
+  const next = { ...base };
+  for (const [who, n] of Object.entries(gains)) {
+    const cur = next[who] ?? { total: 0, combo: 0 };
+    next[who] = { total: cur.total + n, combo: cur.combo };
+  }
+  return next;
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -331,6 +388,7 @@ interface SaveData {
   keycapCount?: number;
   activeKeycapIds?: (string | null)[];
   lastSeenAt?: number;
+  captureStats?: CaptureStats;
 }
 
 function loadGame() {
@@ -348,6 +406,7 @@ function loadGame() {
         keycapCount: s.keycapCount ?? 1,
         activeKeycapIds: s.activeKeycapIds ?? [null, null, null, null],
         lastSeenAt: s.lastSeenAt ?? Date.now(),
+        captureStats: s.captureStats ?? ({} as CaptureStats),
       };
     }
   } catch { /* corrupt save */ }
@@ -365,6 +424,7 @@ function loadGame() {
     keycapCount: 1,
     activeKeycapIds: [null, null, null, null] as (string | null)[],
     lastSeenAt: Date.now(),
+    captureStats: {} as CaptureStats,
   };
 }
 
@@ -383,20 +443,24 @@ function initGame() {
   if (elapsed < NPC_MIN_OFFLINE_MS) {
     return { ...g, report: null as InvasionReport | null, deferredFrom: null as number | null };
   }
-  const { districts, thefts, otherConquests } = simulateNpcOffline(g.districts, elapsed);
+  const { districts, thefts, otherConquests, conquestsBy } = simulateNpcOffline(g.districts, elapsed);
   const report: InvasionReport | null =
     thefts.length > 0 || otherConquests > 0 ? { thefts, otherConquests } : null;
-  return { ...g, districts, report, deferredFrom: null as number | null };
+  return {
+    ...g, districts, report,
+    captureStats: mergeCaptures(g.captureStats, conquestsBy),
+    deferredFrom: null as number | null,
+  };
 }
 
 function saveGame(
   districts: District[], taps: number, bestCombo: number, seasonEnd: number,
-  keycapCount: number, activeKeycapIds: (string | null)[],
+  keycapCount: number, activeKeycapIds: (string | null)[], captureStats: CaptureStats,
 ) {
   try {
     const data: SaveData = {
       districts: districts.map(d => ({ id: d.id, hp: d.currentHp, owner: d.owner })),
-      taps, bestCombo, seasonEnd, keycapCount, activeKeycapIds,
+      taps, bestCombo, seasonEnd, keycapCount, activeKeycapIds, captureStats,
       lastSeenAt: Date.now(),
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
@@ -447,6 +511,8 @@ export default function App() {
   const [invasionReport, setInvasionReport] = useState<InvasionReport | null>(init.report);
   const [comboTime, setComboTime] = useState(() => isComboTime());
   const [comboToast, setComboToast] = useState(false);
+  const [captureStats, setCaptureStats] = useState<CaptureStats>(init.captureStats);
+  const [rankTab, setRankTab] = useState<'hold' | 'gain'>('hold');
 
   const [keycapCount, setKeycapCount] = useState(init.keycapCount);
   const [keycapDesigns, setKeycapDesigns] = useState<KeycapDesign[]>(loadKeycapDesigns);
@@ -509,11 +575,11 @@ export default function App() {
   useEffect(() => {
     clearTimeout(autosaveTimer.current);
     autosaveTimer.current = window.setTimeout(
-      () => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds),
+      () => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds, captureStats),
       500,
     );
     return () => clearTimeout(autosaveTimer.current);
-  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds]);
+  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds, captureStats]);
 
   // ── Save keycap designs ──────────────────────────────
   useEffect(() => {
@@ -527,12 +593,24 @@ export default function App() {
   const districtsRef = useRef(districts);
   useEffect(() => { districtsRef.current = districts; }, [districts]);
 
+  // 점령 기록도 ref를 진실의 원천으로 유지 (flush 시 최신값 저장 보장)
+  const captureStatsRef = useRef(init.captureStats);
+  const recordCapture = useCallback((who: string) => {
+    const cur = captureStatsRef.current[who] ?? { total: 0, combo: 0 };
+    const next: CaptureStats = {
+      ...captureStatsRef.current,
+      [who]: { total: cur.total + 1, combo: cur.combo + (comboTimeRef.current ? 1 : 0) },
+    };
+    captureStatsRef.current = next;
+    setCaptureStats(next);
+  }, []);
+
   // districts는 state가 아니라 ref에서 읽는다: applyOffline이 시뮬레이션 결과를
   // districtsRef에 동기 반영하므로, 직후 flush가 와도 최신 상태가 저장된다.
   const saveNowRef = useRef(() => {});
   useEffect(() => {
     saveNowRef.current = () =>
-      saveGame(districtsRef.current, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds);
+      saveGame(districtsRef.current, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds, captureStatsRef.current);
   }, [totalTaps, bestCombo, keycapCount, activeKeycapIds]);
 
   // hidden 상태로 로드된 경우(프리렌더) 저장된 lastSeenAt에서 부재가 이어지는 중
@@ -544,11 +622,14 @@ export default function App() {
       const elapsed = Math.min(Date.now(), seasonEnd.current) - hiddenAtRef.current;
       hiddenAtRef.current = null;
       if (elapsed < NPC_MIN_OFFLINE_MS) return;
-      const { districts: after, thefts, otherConquests } =
+      const { districts: after, thefts, otherConquests, conquestsBy } =
         simulateNpcOffline(districtsRef.current, elapsed);
       // 점령 미달의 부분 데미지도 항상 반영 — 콜드 스타트(initGame)와 동일 규칙
       districtsRef.current = after;
       setDistricts(after);
+      const mergedStats = mergeCaptures(captureStatsRef.current, conquestsBy);
+      captureStatsRef.current = mergedStats;
+      setCaptureStats(mergedStats);
       if (thefts.length) {
         setFeed(f => [
           ...thefts.slice(0, 5).map(t => ({
@@ -629,6 +710,7 @@ export default function App() {
       const pushFeed = (text: string) =>
         setFeed(f => [{ id: ++feedId.current, text, type: 'npc' as const }, ...f].slice(0, 30));
       if (won) {
+        recordCapture(npc);
         pushFeed(`💥 ${npc} → [${districtLabel(target)}] 점령!`);
         if (wasPlayers) sound.current.npcAlert();
       } else if (wasPlayers) {
@@ -708,6 +790,7 @@ export default function App() {
     setDistricts(updated);
 
     if (won) {
+      recordCapture('player');
       sound.current.conquest();
       if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
       setConquestName(districtLabel(target));
@@ -751,6 +834,12 @@ export default function App() {
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count);
   })();
+
+  // 시즌 누적 점령 랭킹 (🔥 = 콤보 타임 중 점령 횟수)
+  const gainRanking = Object.entries(captureStats)
+    .map(([name, s]) => ({ name, total: s.total, combo: s.combo }))
+    .filter(e => e.total > 0)
+    .sort((a, b) => b.total - a.total || b.combo - a.combo);
 
   // ── Render ───────────────────────────────────────────
   return (
@@ -1319,7 +1408,7 @@ export default function App() {
               </div>
 
               <div className="px-5 pb-6">
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
                     <span style={{ fontSize: 18 }}>🏆</span>
                     <span style={{ fontSize: 14, fontWeight: 900, color: '#fbbf24', letterSpacing: 2 }}>
@@ -1327,11 +1416,107 @@ export default function App() {
                     </span>
                   </div>
                   <span style={{ fontSize: 9, color: '#5a5a8a', letterSpacing: 1 }}>
-                    LIVE · {DISTRICT_DATA.length}개 지역
+                    {rankTab === 'hold' ? `LIVE · ${DISTRICT_DATA.length}개 지역` : '시즌 누적 점령'}
                   </span>
                 </div>
 
-                {ranking.length === 0 ? (
+                {/* 탭: 보유 영토 / 점령 기록 */}
+                <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+                  {([['hold', '🗺 보유 영토'], ['gain', '⚔ 점령 기록']] as const).map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => setRankTab(key)}
+                      style={{
+                        flex: 1, padding: '6px 0',
+                        background: rankTab === key ? '#fbbf24' : '#1a1a35',
+                        color: rankTab === key ? '#0a0a1e' : '#8888bb',
+                        border: `2px solid ${rankTab === key ? '#fbbf24' : '#2a2a45'}`,
+                        fontSize: 10, fontWeight: 900, letterSpacing: 1,
+                        cursor: 'pointer',
+                        fontFamily: "'Courier New', monospace",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {rankTab === 'gain' ? (
+                  gainRanking.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '24px 0', color: '#5a5a8a', fontSize: 12 }}>
+                      아직 점령 기록이 없습니다
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {gainRanking.map((entry, idx) => {
+                          const isPlayer = entry.name === 'player';
+                          const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : null;
+                          const color = isPlayer ? PLAYER_COLOR : (NPC_COLORS[entry.name] || '#ff6b6b');
+                          const pct = Math.round((entry.total / gainRanking[0].total) * 100);
+                          return (
+                            <motion.div
+                              key={entry.name}
+                              initial={{ opacity: 0, x: -20 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ delay: idx * 0.05 }}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                padding: '8px 10px',
+                                background: isPlayer ? 'rgba(0,229,255,0.08)' : 'rgba(255,255,255,0.02)',
+                                border: `2px solid ${isPlayer ? 'rgba(0,229,255,0.2)' : '#1a1a35'}`,
+                              }}
+                            >
+                              <div style={{
+                                width: 24, textAlign: 'center',
+                                fontSize: medal ? 16 : 11,
+                                fontWeight: 900,
+                                color: medal ? undefined : '#5a5a8a',
+                              }}>
+                                {medal || (idx + 1)}
+                              </div>
+                              <div style={{
+                                width: 10, height: 10,
+                                background: color,
+                                border: '1px solid rgba(255,255,255,0.15)',
+                                flexShrink: 0,
+                              }} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{
+                                  fontSize: 11, fontWeight: 900,
+                                  color: isPlayer ? PLAYER_COLOR : '#ccccee',
+                                  marginBottom: 2,
+                                }}>
+                                  {isPlayer ? '나' : entry.name}
+                                </div>
+                                <div style={{ height: 4, background: '#111128', border: '1px solid #1a1a35' }}>
+                                  <div style={{
+                                    height: '100%', width: `${pct}%`,
+                                    background: color, transition: 'width 0.3s',
+                                  }} />
+                                </div>
+                              </div>
+                              <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                                <div style={{
+                                  fontSize: 14, fontWeight: 900,
+                                  color: isPlayer ? PLAYER_COLOR : '#ccccee',
+                                }}>
+                                  {entry.total}회
+                                </div>
+                                <div style={{ fontSize: 9, fontWeight: 700, color: entry.combo > 0 ? '#fbbf24' : '#3a3a5a' }}>
+                                  🔥 {entry.combo}
+                                </div>
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 8, color: '#3a3a5a', textAlign: 'right' }}>
+                        🔥 = 콤보 타임 중 점령
+                      </div>
+                    </>
+                  )
+                ) : ranking.length === 0 ? (
                   <div style={{ textAlign: 'center', padding: '24px 0', color: '#5a5a8a', fontSize: 12 }}>
                     아직 점령된 지역이 없습니다
                   </div>
@@ -1410,8 +1595,9 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Unclaimed count */}
+                {/* Unclaimed count (보유 탭 전용) */}
                 {(() => {
+                  if (rankTab !== 'hold') return null;
                   const unclaimed = districts.filter(d => !d.owner).length;
                   if (unclaimed === 0) return null;
                   return (
