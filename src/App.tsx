@@ -59,11 +59,10 @@ const NPC_COLORS: Record<string, string> = {
 const PLAYER_COLOR = '#00e5ff';
 const UNCLAIMED_BG = '#1e1e3a';
 
-// HP 배율 — 시즌이 7일이므로 점령에 훨씬 많은 클릭이 필요하도록 상향
-// x25: 최소 지역(HP 20) = 500 → 콤보 없이 시작해도 첫 점령까지 ~90탭.
-// 전국 총량 276,000 HP ≈ 무결점 풀콤보 연타 ~2시간, 콤보가 끊기는 현실적
-// 페이스로 ~6시간 + 뺏긴 영토 재점령분이 7일 시즌의 플레이 볼륨.
-const HP_SCALE = 25;
+// HP 배율 — 전국 총 309,120 HP (평균 지역 1,344 / 최소 560 / 최대 2,800).
+// 콤보 상한 x4와 맞물려, 콤보 타임을 매일 꽉 채우는 최상위권이 4일차에
+// 전국을 완성하고 열성 유저가 시즌 마지막 날 도달하는 볼륨.
+const HP_SCALE = 28;
 
 // NPC 속도: 유저가 보고 있는 동안엔 1배로 천천히, 자리를 비우면 3배로 빨라진다.
 // 모든 유저에게 동일하게 적용되는 고정 상수 (랜덤 요소 없음 = 공평).
@@ -72,7 +71,11 @@ const NPC_OFFLINE_DPS = 0.9;                  // 부재 중 3배 속도
 const NPC_ACTIVE_TICK_MS = 20 * 1000;         // 접속 중 NPC 공격 주기 (틱당 데미지 = DPS × 20초 = 6)
 const NPC_MAX_OFFLINE_MS = 8 * 3600 * 1000;   // 한 번의 부재당 최대 8시간까지만 시뮬레이션 (NPC도 잠은 잔다)
 const NPC_MIN_OFFLINE_MS = 60 * 1000;         // 1분 미만의 이탈로는 NPC가 깨어나지 않음
-const NPC_MAX_THEFTS_PER_ABSENCE = 3;         // 부재 1회당 플레이어 영토는 최대 3개까지만 절도 (초보 전멸 방지)
+// 부재 1회당 절도 상한 — 보유량의 10%(최소 1, 최대 3)까지만.
+// 고정 3개였을 때는 영토가 적은 유저일수록 타격이 커서 진행이 정체됐다.
+const NPC_MAX_THEFTS_PER_ABSENCE = 3;
+const theftCapFor = (ownedCount: number) =>
+  Math.max(1, Math.min(NPC_MAX_THEFTS_PER_ABSENCE, Math.ceil(ownedCount * 0.1)));
 
 type DData = Omit<District, 'currentHp' | 'owner'>;
 const D = (id: number, name: string, region: string, row: number, col: number, maxHp: number): DData =>
@@ -269,9 +272,10 @@ function createPixelSound() {
 // Helpers
 // ═══════════════════════════════════════════════════════════
 
+// 콤보 배율 상한 x4 — 콤보 타임 1시간이 시즌 전체를 끝내버리지 않도록,
+// 그리고 콤보 타임을 놓친 유저와의 격차가 과도해지지 않도록 완만하게 설계.
 function comboMultiplier(combo: number): number {
-  if (combo >= 50) return 8;
-  if (combo >= 30) return 5;
+  if (combo >= 30) return 4;
   if (combo >= 15) return 3;
   if (combo >= 5) return 2;
   return 1;
@@ -331,6 +335,7 @@ function simulateNpcOffline(
   if (budget <= 0) return { districts, thefts: [], otherConquests: 0, conquestsBy: {} };
 
   const next = districts.map(d => ({ ...d }));
+  const theftCap = theftCapFor(districts.filter(d => d.owner === 'player').length);
   const thefts: TheftEvent[] = [];
   const conquestsBy: Record<string, number> = {};
   let otherConquests = 0;
@@ -339,7 +344,7 @@ function simulateNpcOffline(
   while (budget > 0) {
     // 우리 동네는 절대 뺏기지 않는다
     const playerLands = next.filter(d => d.owner === 'player' && d.id !== homeId);
-    const canSteal = playerLands.length > 1 && thefts.length < NPC_MAX_THEFTS_PER_ABSENCE;
+    const canSteal = playerLands.length > 1 && thefts.length < theftCap;
     const pool = canSteal ? playerLands : next.filter(d => !d.owner);
     if (!pool.length) break;
 
@@ -380,7 +385,7 @@ function mergeCaptures(base: CaptureStats, gains: Record<string, number>): Captu
 // Local Storage
 // ═══════════════════════════════════════════════════════════
 
-const SAVE_KEY = 'tapwar_pixel_v4';
+const SAVE_KEY = 'tapwar_pixel_v5';
 const KEYCAP_DESIGNS_KEY = 'tapwar_keycap_designs_v1';
 
 interface SaveData {
@@ -571,7 +576,7 @@ export default function App() {
           setTimeout(() => setComboToast(false), 2600);
           sound.current.combo(3);
           if (navigator.vibrate) navigator.vibrate([30, 30, 30]);
-          setFeed(f => [{ id: ++feedId.current, text: '🔥 콤보 타임 시작! 1시간 동안 콤보 배율 최대 ×8!', type: 'system' as const }, ...f].slice(0, 30));
+          setFeed(f => [{ id: ++feedId.current, text: '🔥 콤보 타임 시작! 1시간 동안 콤보 배율 최대 ×4!', type: 'system' as const }, ...f].slice(0, 30));
         } else {
           comboRef.current = 0;
           setCombo(0);
@@ -774,7 +779,7 @@ export default function App() {
       if (c > bestCombo) setBestCombo(c);
       clearTimeout(comboTimer.current);
       comboTimer.current = window.setTimeout(() => { comboRef.current = 0; setCombo(0); }, 1500);
-      if ([5, 15, 30, 50].includes(c)) sound.current.combo(Math.ceil(c / 15));
+      if ([5, 15, 30].includes(c)) sound.current.combo(Math.ceil(c / 15));
     }
     setTotalTaps(t => t + 1);
 
@@ -1029,7 +1034,7 @@ export default function App() {
               }}
             >
               <span style={{ fontSize: 10, fontWeight: 900, color: '#fbbf24' }}>
-                🔥 콤보 타임! 배율 최대 ×8
+                🔥 콤보 타임! 배율 최대 ×4
               </span>
               <span style={{ fontSize: 10, fontWeight: 900, color: '#fbbf24' }}>
                 {mm}:{String(ss).padStart(2, '0')} 남음
@@ -1377,7 +1382,7 @@ export default function App() {
                 콤보 타임 시작!
               </div>
               <div style={{ color: '#ccccee', fontSize: 10, fontWeight: 700, marginTop: 4 }}>
-                지금부터 1시간, 콤보 배율 최대 ×8
+                지금부터 1시간, 콤보 배율 최대 ×4
               </div>
             </motion.div>
           </motion.div>
