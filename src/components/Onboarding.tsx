@@ -1,98 +1,151 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-interface OnboardingProps {
-  onComplete: () => void;
+export interface HomePick {
+  id: number;
+  name: string;
+  region: string;
 }
 
-const STEPS = [
-  {
-    emoji: '👊',
-    title: '동네 탭 전쟁에 오신 걸 환영합니다!',
-    desc: '탭을 눌러 우리 동네를 강남 No.1으로 만드세요',
-  },
-  {
-    emoji: '🔥',
-    title: '50콤보 = 피버 모드',
-    desc: '1초 안에 계속 탭하면 콤보가 올라가고\n50콤보에서 피버 모드(x3 점수)가 발동됩니다',
-  },
-  {
-    emoji: '📋',
-    title: '일일 미션 & 레벨업',
-    desc: '매일 새로운 미션을 완료하고 경험치를 모아\n레벨을 올리세요',
-  },
-  {
-    emoji: '🗺️',
-    title: '실시간 지도로 확인',
-    desc: '강남 일대 동네별 점령 현황을\n지도에서 실시간으로 확인하세요',
-  },
+interface OnboardingProps {
+  districts: HomePick[];
+  onComplete: (districtId: number) => void;
+}
+
+const PLAYER_COLOR = '#00e5ff';
+
+// 시/도 표시 순서 — 수도권부터 아래로
+const REGION_ORDER = [
+  '서울', '경기', '인천', '강원', '충북', '충남', '세종', '대전',
+  '전북', '전남', '광주', '경북', '경남', '대구', '울산', '부산', '제주',
 ];
 
-export function Onboarding({ onComplete }: OnboardingProps) {
-  const [step, setStep] = useState(0);
-  const isLast = step === STEPS.length - 1;
+export function Onboarding({ districts, onComplete }: OnboardingProps) {
+  const [region, setRegion] = useState<string | null>(null);
+
+  const regions = useMemo(() => {
+    const set = new Set(districts.map(d => d.region));
+    return REGION_ORDER.filter(r => set.has(r));
+  }, [districts]);
+
+  const inRegion = useMemo(
+    () => districts.filter(d => d.region === region).sort((a, b) => a.name.localeCompare(b.name, 'ko')),
+    [districts, region],
+  );
 
   return (
     <motion.div
-      className="fixed inset-0 z-[100] bg-gradient-to-b from-blue-600 to-indigo-900 flex flex-col items-center justify-center p-8"
+      className="fixed inset-0 flex flex-col"
+      style={{ zIndex: 100, background: '#0a0a1e', fontFamily: "'Courier New', monospace" }}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
-      <AnimatePresence mode="wait">
-        <motion.div
-          key={step}
-          className="flex flex-col items-center text-center max-w-xs"
-          initial={{ opacity: 0, x: 60 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: -60 }}
-          transition={{ duration: 0.3 }}
-        >
-          <motion.span
-            className="text-8xl mb-8"
-            animate={{ scale: [1, 1.1, 1] }}
-            transition={{ repeat: Infinity, duration: 2 }}
-          >
-            {STEPS[step].emoji}
-          </motion.span>
-          <h1 className="text-2xl font-black text-white mb-4 leading-tight">
-            {STEPS[step].title}
-          </h1>
-          <p className="text-blue-200 text-sm leading-relaxed whitespace-pre-line">
-            {STEPS[step].desc}
-          </p>
-        </motion.div>
-      </AnimatePresence>
+      {/* Header */}
+      <div className="flex-none px-6 pt-10 pb-4 text-center">
+        <div style={{ fontSize: 34, marginBottom: 8 }}>🏴</div>
+        <div style={{ fontSize: 18, fontWeight: 900, color: PLAYER_COLOR, letterSpacing: 3 }}>
+          우리 동네 탭-워
+        </div>
+        <div style={{ fontSize: 11, color: '#8888bb', marginTop: 10, lineHeight: 1.6 }}>
+          {region === null
+            ? '어디 사세요?\n내 동네부터 점령을 시작합니다'
+            : `${region}\n우리 동네를 골라주세요`}
+        </div>
+      </div>
 
-      {/* Dots */}
-      <div className="flex gap-2 mt-12 mb-8">
-        {STEPS.map((_, i) => (
-          <div
-            key={i}
-            className={`w-2 h-2 rounded-full transition-colors ${
-              i === step ? 'bg-white' : 'bg-white/30'
-            }`}
-          />
+      {/* Step indicator */}
+      <div className="flex-none flex justify-center gap-2 pb-3">
+        {[0, 1].map(i => (
+          <div key={i} style={{
+            width: 22, height: 4,
+            background: (region === null ? 0 : 1) >= i ? PLAYER_COLOR : '#2a2a45',
+          }} />
         ))}
       </div>
 
-      {/* Button */}
-      <motion.button
-        onClick={() => (isLast ? onComplete() : setStep(step + 1))}
-        className="w-full max-w-xs py-4 rounded-2xl bg-white text-blue-600 font-black text-lg active:scale-[0.97] transition-transform"
-        whileTap={{ scale: 0.97 }}
-      >
-        {isLast ? '시작하기!' : '다음'}
-      </motion.button>
+      {/* Choices */}
+      <div className="flex-1 overflow-y-auto px-5 pb-4 min-h-0">
+        <AnimatePresence mode="wait">
+          {region === null ? (
+            <motion.div
+              key="regions"
+              initial={{ opacity: 0, x: -16 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -16 }}
+              transition={{ duration: 0.18 }}
+              style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}
+            >
+              {regions.map(r => (
+                <button
+                  key={r}
+                  onClick={() => setRegion(r)}
+                  style={{
+                    padding: '14px 0',
+                    background: '#1a1a35',
+                    border: '3px solid',
+                    borderColor: '#3a3a5a #12122a #12122a #3a3a5a',
+                    color: '#ccccee',
+                    fontSize: 13, fontWeight: 900, letterSpacing: 1,
+                    cursor: 'pointer',
+                    fontFamily: "'Courier New', monospace",
+                  }}
+                >
+                  {r}
+                </button>
+              ))}
+            </motion.div>
+          ) : (
+            <motion.div
+              key="districts"
+              initial={{ opacity: 0, x: 16 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 16 }}
+              transition={{ duration: 0.18 }}
+              style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}
+            >
+              {inRegion.map(d => (
+                <button
+                  key={d.id}
+                  onClick={() => onComplete(d.id)}
+                  style={{
+                    padding: '12px 2px',
+                    background: '#1a1a35',
+                    border: '3px solid',
+                    borderColor: '#3a3a5a #12122a #12122a #3a3a5a',
+                    color: '#ccccee',
+                    fontSize: 11, fontWeight: 900,
+                    cursor: 'pointer',
+                    fontFamily: "'Courier New', monospace",
+                  }}
+                >
+                  {d.name}
+                </button>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
 
-      {!isLast && (
-        <button
-          onClick={onComplete}
-          className="mt-4 text-white/50 text-sm"
-        >
-          건너뛰기
-        </button>
-      )}
+      {/* Footer */}
+      <div className="flex-none px-5 pb-8 pt-2">
+        {region !== null && (
+          <button
+            onClick={() => setRegion(null)}
+            style={{
+              width: '100%', padding: '10px 0',
+              background: 'transparent',
+              border: '2px solid #2a2a45',
+              color: '#6a6a9a',
+              fontSize: 11, fontWeight: 900, letterSpacing: 2,
+              cursor: 'pointer',
+              fontFamily: "'Courier New', monospace",
+            }}
+          >
+            ← 다른 지역 선택
+          </button>
+        )}
+      </div>
     </motion.div>
   );
 }

@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
+import { Onboarding } from './components/Onboarding';
 
 // ═══════════════════════════════════════════════════════════
 // Types
@@ -323,6 +324,7 @@ function formatTime(ms: number): string {
 function simulateNpcOffline(
   districts: District[],
   elapsedMs: number,
+  homeId: number | null = null,
 ): { districts: District[]; thefts: TheftEvent[]; otherConquests: number; conquestsBy: Record<string, number> } {
   const cappedMs = Math.min(elapsedMs, NPC_MAX_OFFLINE_MS);
   let budget = Math.floor((cappedMs / 1000) * NPC_OFFLINE_DPS);
@@ -335,7 +337,8 @@ function simulateNpcOffline(
   let npcIdx = Math.floor(elapsedMs / 1000) % NPC_NAMES.length;
 
   while (budget > 0) {
-    const playerLands = next.filter(d => d.owner === 'player');
+    // 우리 동네는 절대 뺏기지 않는다
+    const playerLands = next.filter(d => d.owner === 'player' && d.id !== homeId);
     const canSteal = playerLands.length > 1 && thefts.length < NPC_MAX_THEFTS_PER_ABSENCE;
     const pool = canSteal ? playerLands : next.filter(d => !d.owner);
     if (!pool.length) break;
@@ -389,6 +392,7 @@ interface SaveData {
   activeKeycapIds?: (string | null)[];
   lastSeenAt?: number;
   captureStats?: CaptureStats;
+  homeId?: number | null;
 }
 
 function loadGame() {
@@ -407,6 +411,8 @@ function loadGame() {
         activeKeycapIds: s.activeKeycapIds ?? [null, null, null, null],
         lastSeenAt: s.lastSeenAt ?? Date.now(),
         captureStats: s.captureStats ?? ({} as CaptureStats),
+        homeId: s.homeId ?? null,
+        isNew: false,
       };
     }
   } catch { /* corrupt save */ }
@@ -425,6 +431,8 @@ function loadGame() {
     activeKeycapIds: [null, null, null, null] as (string | null)[],
     lastSeenAt: Date.now(),
     captureStats: {} as CaptureStats,
+    homeId: null as number | null,
+    isNew: true,
   };
 }
 
@@ -443,7 +451,7 @@ function initGame() {
   if (elapsed < NPC_MIN_OFFLINE_MS) {
     return { ...g, report: null as InvasionReport | null, deferredFrom: null as number | null };
   }
-  const { districts, thefts, otherConquests, conquestsBy } = simulateNpcOffline(g.districts, elapsed);
+  const { districts, thefts, otherConquests, conquestsBy } = simulateNpcOffline(g.districts, elapsed, g.homeId);
   const report: InvasionReport | null =
     thefts.length > 0 || otherConquests > 0 ? { thefts, otherConquests } : null;
   return {
@@ -456,11 +464,12 @@ function initGame() {
 function saveGame(
   districts: District[], taps: number, bestCombo: number, seasonEnd: number,
   keycapCount: number, activeKeycapIds: (string | null)[], captureStats: CaptureStats,
+  homeId: number | null,
 ) {
   try {
     const data: SaveData = {
       districts: districts.map(d => ({ id: d.id, hp: d.currentHp, owner: d.owner })),
-      taps, bestCombo, seasonEnd, keycapCount, activeKeycapIds, captureStats,
+      taps, bestCombo, seasonEnd, keycapCount, activeKeycapIds, captureStats, homeId,
       lastSeenAt: Date.now(),
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(data));
@@ -488,9 +497,11 @@ export default function App() {
   const [init] = useState(initGame);
   const [districts, setDistricts] = useState<District[]>(init.districts);
   const [selectedId, setSelectedId] = useState(() => {
-    // 첫 목표는 가장 싼 미점령지 — 첫 점령 도파민까지의 거리를 최소화
+    // 우리 동네가 아직 내 것이 아니면 그곳부터, 아니면 가장 싼 미점령지
+    const home = init.districts.find(d => d.id === init.homeId);
+    if (home && home.owner !== 'player') return home.id;
     const unclaimed = init.districts.filter(d => !d.owner);
-    if (!unclaimed.length) return init.districts[0].id;
+    if (!unclaimed.length) return home?.id ?? init.districts[0].id;
     return unclaimed.reduce((min, d) => (d.maxHp < min.maxHp ? d : min)).id;
   });
   const [combo, setCombo] = useState(0);
@@ -514,6 +525,8 @@ export default function App() {
   const [captureStats, setCaptureStats] = useState<CaptureStats>(init.captureStats);
   const [rankTab, setRankTab] = useState<'hold' | 'gain'>('hold');
   const [regionDone, setRegionDone] = useState<string | null>(null);
+  const [homeId, setHomeId] = useState<number | null>(init.homeId);
+  const [showOnboarding, setShowOnboarding] = useState(init.isNew);
 
   const [keycapCount, setKeycapCount] = useState(init.keycapCount);
   const [keycapDesigns, setKeycapDesigns] = useState<KeycapDesign[]>(loadKeycapDesigns);
@@ -576,11 +589,11 @@ export default function App() {
   useEffect(() => {
     clearTimeout(autosaveTimer.current);
     autosaveTimer.current = window.setTimeout(
-      () => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds, captureStats),
+      () => saveGame(districts, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds, captureStats, homeId),
       500,
     );
     return () => clearTimeout(autosaveTimer.current);
-  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds, captureStats]);
+  }, [districts, totalTaps, bestCombo, keycapCount, activeKeycapIds, captureStats, homeId]);
 
   // ── Save keycap designs ──────────────────────────────
   useEffect(() => {
@@ -593,6 +606,9 @@ export default function App() {
   // 활동을 일괄 반영한 뒤 뺏긴 영토를 침공 리포트로 알려준다.
   const districtsRef = useRef(districts);
   useEffect(() => { districtsRef.current = districts; }, [districts]);
+
+  const homeIdRef = useRef(init.homeId);
+  useEffect(() => { homeIdRef.current = homeId; }, [homeId]);
 
   // 점령 기록도 ref를 진실의 원천으로 유지 (flush 시 최신값 저장 보장)
   const captureStatsRef = useRef(init.captureStats);
@@ -611,7 +627,7 @@ export default function App() {
   const saveNowRef = useRef(() => {});
   useEffect(() => {
     saveNowRef.current = () =>
-      saveGame(districtsRef.current, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds, captureStatsRef.current);
+      saveGame(districtsRef.current, totalTaps, bestCombo, seasonEnd.current, keycapCount, activeKeycapIds, captureStatsRef.current, homeIdRef.current);
   }, [totalTaps, bestCombo, keycapCount, activeKeycapIds]);
 
   // hidden 상태로 로드된 경우(프리렌더) 저장된 lastSeenAt에서 부재가 이어지는 중
@@ -624,7 +640,7 @@ export default function App() {
       hiddenAtRef.current = null;
       if (elapsed < NPC_MIN_OFFLINE_MS) return;
       const { districts: after, thefts, otherConquests, conquestsBy } =
-        simulateNpcOffline(districtsRef.current, elapsed);
+        simulateNpcOffline(districtsRef.current, elapsed, homeIdRef.current);
       // 점령 미달의 부분 데미지도 항상 반영 — 콜드 스타트(initGame)와 동일 규칙
       districtsRef.current = after;
       setDistricts(after);
@@ -692,7 +708,7 @@ export default function App() {
       tickN++;
       const dmg = Math.round(NPC_ACTIVE_DPS * (NPC_ACTIVE_TICK_MS / 1000));
       const lands = districtsRef.current;
-      const playerLands = lands.filter(d => d.owner === 'player');
+      const playerLands = lands.filter(d => d.owner === 'player' && d.id !== homeIdRef.current);
       const attackPlayer = tickN % 3 === 0 && playerLands.length > 1;
       const pool = attackPlayer ? playerLands : lands.filter(d => !d.owner);
       if (!pool.length) return;
@@ -818,6 +834,29 @@ export default function App() {
     }
   }, [selectedId, bestCombo, addFeed, nextTarget]);
 
+  // ── Onboarding: 우리 동네 선택 ───────────────────────
+  // 고른 동네는 HP 절반으로 시작해 첫 점령까지의 거리를 좁히고,
+  // 이후 NPC가 절대 뺏지 못하는 거점이 된다.
+  const handlePickHome = useCallback((districtId: number) => {
+    setHomeId(districtId);
+    homeIdRef.current = districtId;
+    const updated = districtsRef.current.map(d =>
+      d.id === districtId
+        ? { ...d, owner: null, currentHp: Math.max(1, Math.round(d.maxHp / 2)) }
+        : d);
+    districtsRef.current = updated;
+    setDistricts(updated);
+    setSelectedId(districtId);
+    const home = updated.find(d => d.id === districtId);
+    if (home) {
+      setFeed(f => [
+        { id: ++feedId.current, text: `🏠 우리 동네 [${districtLabel(home)}]부터 점령을 시작합니다!`, type: 'system' as const },
+        ...f,
+      ].slice(0, 30));
+    }
+    setShowOnboarding(false);
+  }, []);
+
   // ── Keycap Design Handlers ───────────────────────────
   const handleSaveDesign = useCallback((design: KeycapDesign) => {
     setKeycapDesigns(prev => [...prev, design]);
@@ -936,7 +975,13 @@ export default function App() {
                 animate={isSel ? { opacity: [1, 0.55, 1] } : { opacity: 1 }}
                 transition={isSel ? { repeat: Infinity, duration: 0.7, ease: 'easeInOut' } : { duration: 0.15 }}
               >
-                {d.owner === 'player' && (
+                {d.id === homeId ? (
+                  <div style={{
+                    position: 'absolute', inset: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 7, color: d.owner === 'player' ? '#0a0a1e' : '#fbbf24', fontWeight: 900,
+                  }}>⌂</div>
+                ) : d.owner === 'player' && (
                   <div style={{
                     position: 'absolute', inset: 0,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1021,7 +1066,7 @@ export default function App() {
             <div className="flex justify-between items-baseline mb-1">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold" style={{ color: ownerColor(selected.owner) }}>
-                  [{districtLabel(selected)}]
+                  {selected.id === homeId && '🏠 '}[{districtLabel(selected)}]
                 </span>
                 {(() => {
                   const rp = regionProgress[selected.region];
@@ -1254,6 +1299,16 @@ export default function App() {
               </div>
             </motion.div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Onboarding (첫 실행) ─────────────────── */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <Onboarding
+            districts={DISTRICT_DATA.map(d => ({ id: d.id, name: d.name, region: d.region }))}
+            onComplete={handlePickHome}
+          />
         )}
       </AnimatePresence>
 
