@@ -1,7 +1,8 @@
 import { defineConfig } from '@apps-in-toss/web-framework/config';
 
 export default defineConfig({
-  appName: 'local-tap-war',
+  // 앱인토스 콘솔에 등록한 appName과 반드시 일치해야 한다
+  appName: 'tapwar-game',
   brand: {
     // 게임의 대표 색상 (플레이어 영토 색과 동일)
     primaryColor: '#00e5ff',
