@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { KeycapDesigner, type KeycapDesign } from './components/KeycapDesigner';
 
@@ -513,6 +513,7 @@ export default function App() {
   const [comboToast, setComboToast] = useState(false);
   const [captureStats, setCaptureStats] = useState<CaptureStats>(init.captureStats);
   const [rankTab, setRankTab] = useState<'hold' | 'gain'>('hold');
+  const [regionDone, setRegionDone] = useState<string | null>(null);
 
   const [keycapCount, setKeycapCount] = useState(init.keycapCount);
   const [keycapDesigns, setKeycapDesigns] = useState<KeycapDesign[]>(loadKeycapDesigns);
@@ -725,14 +726,15 @@ export default function App() {
     setFeed(f => [{ id: ++feedId.current, text, type }, ...f].slice(0, 30));
   }, []);
 
+  // 자동 타깃팅: 같은 시/도를 먼저 완성하고, 다 먹었으면 전국에서 가장 가까운 곳으로.
+  // '우리 동네 → 우리 시/도 → 전국' 순서로 영토가 번져나가게 만든다.
   const nextTarget = useCallback((current: District, dists: District[]): number => {
     const avail = dists.filter(d => d.owner !== 'player');
     if (!avail.length) return current.id;
-    avail.sort((a, b) =>
-      (Math.abs(a.row - current.row) + Math.abs(a.col - current.col)) -
-      (Math.abs(b.row - current.row) + Math.abs(b.col - current.col))
-    );
-    return avail[0].id;
+    const sameRegion = avail.filter(d => d.region === current.region);
+    const pool = sameRegion.length ? sameRegion : avail;
+    const dist = (d: District) => Math.abs(d.row - current.row) + Math.abs(d.col - current.col);
+    return pool.reduce((best, d) => (dist(d) < dist(best) ? d : best)).id;
   }, []);
 
   // ── Tap Handler ──────────────────────────────────────
@@ -792,10 +794,25 @@ export default function App() {
     if (won) {
       recordCapture('player');
       sound.current.conquest();
-      if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
-      setConquestName(districtLabel(target));
-      setTimeout(() => setConquestName(null), 1500);
-      addFeed(`🏴 [${districtLabel(target)}] 점령 완료!`, 'player');
+
+      // 이 점령으로 시/도 전체가 완성됐는지
+      const regionComplete = updated
+        .filter(d => d.region === target.region)
+        .every(d => d.owner === 'player');
+
+      if (regionComplete) {
+        if (navigator.vibrate) navigator.vibrate([60, 40, 60, 40, 100]);
+        sound.current.combo(3);
+        setRegionDone(target.region);
+        setTimeout(() => setRegionDone(null), 2400);
+        addFeed(`👑 [${target.region}] 전 지역 정복 완료!`, 'player');
+      } else {
+        if (navigator.vibrate) navigator.vibrate([40, 20, 40]);
+        setConquestName(districtLabel(target));
+        setTimeout(() => setConquestName(null), 1500);
+        addFeed(`🏴 [${districtLabel(target)}] 점령 완료!`, 'player');
+      }
+
       const nxt = nextTarget(target, updated);
       setTimeout(() => setSelectedId(nxt), 200);
     }
@@ -834,6 +851,17 @@ export default function App() {
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count);
   })();
+
+  // 시/도별 점령 진행도
+  const regionProgress = useMemo(() => {
+    const m: Record<string, { owned: number; total: number }> = {};
+    for (const d of districts) {
+      const r = m[d.region] ?? (m[d.region] = { owned: 0, total: 0 });
+      r.total++;
+      if (d.owner === 'player') r.owned++;
+    }
+    return m;
+  }, [districts]);
 
   // 시즌 누적 점령 랭킹 (🔥 = 콤보 타임 중 점령 횟수)
   const gainRanking = Object.entries(captureStats)
@@ -995,9 +1023,21 @@ export default function App() {
                 <span className="text-xs font-bold" style={{ color: ownerColor(selected.owner) }}>
                   [{districtLabel(selected)}]
                 </span>
-                {!DUP_NAMES.has(selected.name) && (
-                  <span className="text-[9px]" style={{ color: '#5a5a8a' }}>{selected.region}</span>
-                )}
+                {(() => {
+                  const rp = regionProgress[selected.region];
+                  if (!rp) return null;
+                  const done = rp.owned === rp.total;
+                  return (
+                    <span style={{
+                      fontSize: 9, fontWeight: 900,
+                      color: done ? '#fbbf24' : '#6a6a9a',
+                      border: `1px solid ${done ? '#fbbf24' : '#2a2a45'}`,
+                      padding: '1px 4px',
+                    }}>
+                      {done ? '👑' : ''}{selected.region} {rp.owned}/{rp.total}
+                    </span>
+                  );
+                })()}
               </div>
               <span className="text-[10px] font-bold" style={{ color: isOwned ? '#4ade80' : '#ccccee' }}>
                 {isOwned
@@ -1211,6 +1251,42 @@ export default function App() {
               </div>
               <div style={{ color: '#fbbf24', fontSize: 11, fontWeight: 700, letterSpacing: 3, marginTop: 4 }}>
                 점 령 완 료
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Region Conquered Toast ───────────────── */}
+      <AnimatePresence>
+        {regionDone && (
+          <motion.div
+            className="fixed inset-0 flex items-center justify-center pointer-events-none"
+            style={{ zIndex: 72 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              initial={{ scale: 0.3, opacity: 0, rotate: -6 }}
+              animate={{ scale: 1, opacity: 1, rotate: 0 }}
+              exit={{ scale: 1.4, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 380, damping: 14 }}
+              style={{
+                background: '#0a0a1e',
+                border: '5px solid',
+                borderColor: '#fbbf24 #7a5a10 #7a5a10 #fbbf24',
+                padding: '20px 34px',
+                textAlign: 'center',
+                boxShadow: '0 0 50px rgba(251,191,36,0.45)',
+              }}
+            >
+              <div style={{ fontSize: 34, marginBottom: 4 }}>👑</div>
+              <div style={{ color: '#fbbf24', fontSize: 20, fontWeight: 900, letterSpacing: 3 }}>
+                {regionDone}
+              </div>
+              <div style={{ color: '#fff', fontSize: 12, fontWeight: 900, letterSpacing: 4, marginTop: 6 }}>
+                전 지 역 정 복
               </div>
             </motion.div>
           </motion.div>
